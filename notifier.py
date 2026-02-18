@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
-from .config import config
-from .scanner import SolanaProject
+from config import config
+from scanner import SolanaProject
 
 logger = logging.getLogger(__name__)
 JST = timezone(timedelta(hours=9))
