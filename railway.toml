@@ -5,4 +5,5 @@ builder = "nixpacks"
 startCommand = "python main.py daemon"
 restartPolicyType = "always"
 restartPolicyMaxRetries = 5
-healthcheckPath = ""
+serviceType = "worker"
+
