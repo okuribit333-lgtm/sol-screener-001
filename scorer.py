@@ -12,8 +12,8 @@ from typing import Optional
 import aiohttp
 from bs4 import BeautifulSoup
 
-from .config import config
-from .scanner import SolanaProject
+from config import config
+from scanner import SolanaProject
 
 logger = logging.getLogger(__name__)
 
