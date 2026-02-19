@@ -1,9 +1,8 @@
 [build]
-builder = "nixpacks"
+builder = "NIXPACKS"
 
 [deploy]
-startCommand = "python main.py daemon"
-restartPolicyType = "always"
-restartPolicyMaxRetries = 5
-serviceType = "worker"
-
+startCommand = "python main.py"
+healthcheckPath = ""
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

@@ -1,144 +1,64 @@
-# SOL Auto Screener - 統合版
+# Solana 高度なスクリーナーBot (sol-screener-001) v4 完成版
 
-新規Solanaプロジェクトを自動発見 → スコアリング → Discord/Telegram/LINEに通知。
-月額¥0、24時間稼働。
+ご依頼いただいた「マニア向け」追加機能をすべて統合し、Railwayでの安定稼働を想定したアップグレード版の完成コードです。
 
----
+## ✨ 主なアップグレード内容
 
-## できること
+### 1. Pump.fun 卒業のリアルタイム検知
+- **Raydium上場を最速検知**: `scanner.py` と `pumpfun.py` を強化。DexScreener API の `search` エンドポイントを活用し、`dexId: "raydium"` かつ作成直後（直近30分以内）の新規ペアを常時監視。これにより、Pump.funからRaydiumへ移行した瞬間のトークンをリアルタイムで捕捉します。
+- **RPCフォールバック**: 従来のRPC `getSignaturesForAddress` を使ったMigrationトランザクション解析も並行して実行し、検知の冗長性を確保しています。
 
-```
-1. DexScreener 3系統から新規Solanaトークンを自動スキャン
-2. オンチェーン・Twitter・Discord・GitHubの4ソースでスコアリング
-3. 上位5プロジェクトに絞り込み
-4. Discord / Telegram / LINE に同時通知
-5. 実際の操作は人が判断（セキュリティ・ガス調整）
-```
+### 2. ラグプル（詐欺）検知の強化
+- **ミント権限の直接チェック**: `safety.py` を更新し、Solana RPC (`getAccountInfo`) を直接呼び出してトークンのミント権限が放棄されているかをチェックするロジックを追加しました。これにより、無限発行リスクをより正確に判定します。
+- **統合的な安全性スコア**: RugCheck APIによるLPロック状況、Top 10ホルダー保有率、リスク分析結果と、ミント権限の有無を統合し、`safe`, `warning`, `danger` の3段階でリスクレベルを判定します。
 
----
+### 3. スマートマネー（Smart Money）追跡
+- **既知ウォレット追跡**: `mania.py` を新設。`.env` ファイルで指定した「利益を出している既知のウォレット」が、スキャン対象トークンのTopホルダーに含まれているかを自動で照合し、スコアにボーナスを加算します。
+- **ホエール分析**: RugCheckのTopホルダー情報を利用し、2%以上を保有する「ホエール」の数や保有率の集中度を分析し、スコアリングに反映します。
 
-## Railway でデプロイする方法
+### 4. Discord通知のUX改善
+- **リッチなEmbed通知**: `notifier.py` を全面的に刷新。単なるテキストではなく、視認性の高いDiscord Embed形式で通知します。
+- **ダイレクトリンクボタン**: 通知には、**[DexScreener] [RugCheck] [BirdEye] [Solscan]** への直リンクをMarkdown形式で埋め込み、ワンクリックで詳細分析ページに飛べるようにしました。（Discord Webhookの仕様上、ボタンではなくリンク形式での実装となります）
+- **状況に応じたカラーリング**: スコアやリスクレベルに応じて、Embedのサイドカラーが緑（安全/高スコア）、黄（注意）、赤（危険）、紫（卒業）などに変化し、状況を直感的に把握できます。
 
-### 1. GitHubにリポジトリを作る
-
-```bash
-cd sol-screener-final
-git init
-git add .
-git commit -m "initial commit"
-git remote add origin https://github.com/YOUR_NAME/sol-screener.git
-git push -u origin main
-```
-
-### 2. Railwayアカウント作成
-
-https://railway.app にアクセス → GitHubアカウントでサインアップ（無料）
-
-### 3. プロジェクト作成
-
-1. Railway ダッシュボード → 「New Project」
-2. 「Deploy from GitHub repo」を選択
-3. 作成したリポジトリを選択
-4. 自動でビルドが始まる
-
-### 4. 環境変数を設定
-
-Railway ダッシュボード → 作成したサービス → 「Variables」タブ
-
-以下を追加（使うものだけ）：
+## 📂 プロジェクト構成
 
 ```
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxxxx/xxxxx
-TELEGRAM_BOT_TOKEN=123456:ABCdef...
-TELEGRAM_CHAT_ID=123456789
-LINE_NOTIFY_TOKEN=xxxxx
+/sol-screener-v4
+├── main.py             # メインロジック、スケジューラ
+├── src/                # ソースコード
+│   ├── __init__.py
+│   ├── scanner.py      # 4系統での新規ペア発見 + Raydium卒業検知
+│   ├── scorer.py       # 多次元スコアリング
+│   ├── safety.py       # 安全性チェック（ミント権限/LP/ホルダー）
+│   ├── notifier.py     # Discord Embed通知（直リンク付き）
+│   ├── pumpfun.py      # Pump.fun卒業検知ロジック
+│   ├── mania.py        # スマートマネー追跡
+│   ├── state.py        # 通知済み状態の管理
+│   ├── config.py       # 環境変数からの設定読み込み
+│   ├── expectation.py  # 期待値計算
+│   ├── monitors.py     # ウォレット/流動性/SOL価格の監視
+│   ├── market_events.py # TGE/NFT/Meme急騰の監視
+│   ├── airdrop.py      # (既存機能)
+│   ├── background.py   # (既存機能)
+│   └── nft.py          # (既存機能)
+├── data/               # (状態ファイル保存用、.gitignore対象)
+├── logs/               # (ログファイル保存用、.gitignore対象)
+├── .env.example        # 環境変数設定のサンプル
+├── requirements.txt    # 必要なPythonパッケージ
+├── railway.toml        # Railwayデプロイ設定
+├── Procfile            # Railway Workerモード設定
+└── .gitignore
 ```
 
-### 5. Worker として設定
+## 🚀 デプロイ手順 (Railway)
 
-Railway ダッシュボード → サービス → 「Settings」タブ
+1.  **GitHubにPush**: このプロジェクト一式を、ご自身の新しいGitHubリポジトリにpushしてください。
+2.  **Railwayでプロジェクト作成**: Railwayダッシュボードで「New Project」から、作成したGitHubリポジトリを選択します。
+3.  **環境変数の設定**: Railwayのプロジェクト設定画面の「Variables」タブで、`.env.example` を参考に以下の環境変数を設定します。
+    - `DISCORD_WEBHOOK_URL`: **必須**。通知を送りたいDiscordチャンネルのWebhook URL。
+    - `HELIUS_API_KEY`: （任意）HeliusのAPIキーを設定すると、RPCアクセスが高速・安定します。
+    - `WATCH_WALLETS`: （任意）追跡したいスマートマネーウォレットを `アドレス1:ラベル1,アドレス2:ラベル2` の形式で設定します。
+4.  **デプロイ**: 自動でデプロイが開始されます。`railway.toml` と `Procfile` により、自動的に**Worker**として認識され、Webサーバーではなくバックグラウンドプロセスとして起動します。
 
-- 「Start Command」を確認: `python main.py daemon`
-- Web サービスではなく Worker として動く（HTTPポート不要）
-
-### 6. デプロイ完了
-
-環境変数を保存すると自動で再デプロイされる。
-ログは Railway ダッシュボード → 「Deployments」→ 「View Logs」で確認。
-
----
-
-## Railway の料金
-
-- Trial Plan: 無料（$5分/月、500時間）
-- Hobby Plan: $5/月（$5分のクレジット含む、十分動く）
-- このBotの消費リソース: 月$1-2程度
-
----
-
-## 通知先の設定方法
-
-### Discord Webhook
-1. Discordサーバー → サーバー設定 → 連携サービス → ウェブフック
-2. 「新しいウェブフック」→ URLをコピー
-
-### Telegram Bot
-1. Telegram で @BotFather にメッセージ
-2. `/newbot` → 名前入力 → トークン取得
-3. ボットにメッセージ送信
-4. `https://api.telegram.org/bot<TOKEN>/getUpdates` でChat ID確認
-
-### LINE Notify
-1. https://notify-bot.line.me/ にログイン
-2. マイページ → トークン発行
-
----
-
-## ローカルで動かす場合
-
-```bash
-# セットアップ
-pip install -r requirements.txt
-cp .env.example .env
-nano .env  # 通知先を設定
-
-# 1回実行
-python main.py once
-
-# デーモン（定期実行）
-python main.py daemon
-```
-
----
-
-## ファイル構成
-
-```
-sol-screener-final/
-├── main.py              # エントリーポイント & スケジューラー
-├── src/
-│   ├── config.py        # 設定管理
-│   ├── scanner.py       # DexScreener 3系統スキャン
-│   ├── scorer.py        # 4ソーススコアリング（Twitter=Nitter/BS4）
-│   └── notifier.py      # 3チャネル通知（Discord Embed対応）
-├── Procfile             # Railway用
-├── railway.toml         # Railway設定
-├── .env.example         # 環境変数テンプレート
-├── requirements.txt     # 依存関係
-└── README.md
-```
-
----
-
-## 統合で採用した部分
-
-| 機能 | 採用元 | 理由 |
-|------|--------|------|
-| 3系統スキャン | v2 | 最新/ブースト/トレンドの3ルートでカバー範囲広い |
-| 対数スケールスコア | v2 | 閾値ベースより精度が高い |
-| BeautifulSoup Nitter | 元コード | 正規表現より堅牢にHTML解析できる |
-| トークン名GitHub検索 | 元コード | URLなくてもGitHub存在チェックできる |
-| Discord公開API | v2 | Bot不要でメンバー数/オンライン率が取れる |
-| Discord Embed通知 | v2 | スコアバー・色分けで視認性が高い |
-| APScheduler | v2 | cron不要でデーモン内で完結 |
-| Railway対応 | 新規 | Git push → 自動デプロイ |
+以上で、設定したスケジュールに従ってBotが自動的に動作を開始します。ログはRailwayの「Deploy Logs」画面で確認できます。
