@@ -1,9 +1,23 @@
 """
-通知モジュール v4 — Discord Embed 完全対応
-DexScreener / RugCheck / BirdEye / Solscan への直リンク付き
+通知モジュール v5.2 — Discord Embed UX 全面改善版
 
-Discord Webhook では ActionRow ボタンは使えないため、
-Embed の description 内にマークダウンリンクを配置して対応。
+■ 色分けルール（Embed左のバー色）:
+  🟢 緑 (0x00FF88) = スコア70以上 / 安全 / 高確度エアドロ
+  🟡 黄 (0xFFCC00) = スコア40-69 / 注意 / 中確度エアドロ
+  🔴 赤 (0xFF3333) = 危険トークン / ラグプル警告
+  🟣 紫 (0x9B59B6) = Pump.fun 卒業（Raydium上場）
+  🟠 金 (0xF1C40F) = スマートマネー検知
+  🔵 青 (0x5865F2) = 情報通知 / 起動 / 日次レポート
+  ⚪ グレー (0x95A5A6) = 低確度エアドロ
+
+■ 通知種別（タイトルで区別）:
+  🔍 定期スキャン結果     — 1時間ごとのフルスキャン
+  ⚡ リアルタイム検知      — 5分ごとの急騰/TGE/卒業
+  🎓 Pump.fun 卒業        — Raydium上場の瞬間
+  ⚠️ 危険トークン         — ラグプル疑い
+  🧠 Smart Money          — 大口ウォレットの動き
+  ✈️ エアドロップ情報     — 1日2回のエアドロ
+  📊 日次レポート         — 毎朝のまとめ
 """
 import asyncio
 import logging
@@ -34,32 +48,53 @@ def _photon_url(token_address: str) -> str:
     return f"https://photon-sol.tinyastro.io/en/lp/{token_address}"
 
 
-class Notifier:
-    """Discord Webhook 通知（Embed 形式）"""
+def _rank_label(score: float) -> str:
+    """スコアからランクラベルを生成"""
+    if score >= 80:
+        return "S"
+    elif score >= 60:
+        return "A"
+    elif score >= 40:
+        return "B"
+    elif score >= 20:
+        return "C"
+    return "D"
 
-    # Embed カラー
-    COLOR_GREEN = 0x00FF88    # 安全 / 高スコア
-    COLOR_YELLOW = 0xFFCC00   # 注意
-    COLOR_RED = 0xFF3333      # 危険
-    COLOR_BLUE = 0x5865F2     # 情報
-    COLOR_PURPLE = 0x9B59B6   # 卒業
-    COLOR_GOLD = 0xF1C40F     # スマートマネー
+
+def _score_bar(score: float) -> str:
+    """スコアをビジュアルバーで表現"""
+    filled = int(score / 10)
+    empty = 10 - filled
+    return "█" * filled + "░" * empty
+
+
+class Notifier:
+    """Discord Webhook 通知（Embed 形式・UX改善版）"""
+
+    # Embed カラー定義
+    COLOR_GREEN  = 0x00FF88   # 安全 / 高スコア (70+)
+    COLOR_YELLOW = 0xFFCC00   # 注意 / 中スコア (40-69)
+    COLOR_RED    = 0xFF3333   # 危険 / ラグプル
+    COLOR_BLUE   = 0x5865F2   # 情報 / レポート
+    COLOR_PURPLE = 0x9B59B6   # Pump.fun 卒業
+    COLOR_GOLD   = 0xF1C40F   # スマートマネー
+    COLOR_GREY   = 0x95A5A6   # 低確度
 
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
         self.webhook_url = config.discord_webhook_url
 
     # ================================================================
-    # メイン: スキャン結果通知
+    # 1. フルスキャン結果通知
     # ================================================================
     async def send_scan_results(
         self,
         projects: list[SolanaProject],
         safety_results: Optional[dict] = None,
         smart_money_results: Optional[dict] = None,
-        title: str = "🔍 Solana スキャン結果",
+        title: str = "🔍 定期スキャン結果",
     ):
-        """スキャン結果を Discord Embed で通知"""
+        """フルスキャン結果を Discord Embed で通知"""
         if not self.webhook_url:
             logger.warning("DISCORD_WEBHOOK_URL が未設定")
             return
@@ -68,21 +103,29 @@ class Notifier:
             await self._send_simple(f"{title}\n\n対象トークンなし")
             return
 
-        # ── サマリー Embed ──
-        summary_embed = {
+        # ── 凡例（初回のみ） ──
+        legend_embed = {
             "title": title,
             "description": (
                 f"**{len(projects)}件**のトークンを検出\n"
-                f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+                f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                "**■ 色分けルール:**\n"
+                "🟢 緑 = スコア70+ (S/Aランク)\n"
+                "🟡 黄 = スコア40-69 (Bランク)\n"
+                "🔴 赤 = スコア40未満 (C/Dランク)\n"
+                "🟣 紫 = Pump.fun卒業トークン\n\n"
+                "**■ スコア基準:**\n"
+                "流動性(15%) + 出来高(15%) + 価格変動(10%) + TX数(10%) + "
+                "ソーシャル(35%) + 開発(10%) + 安全性ボーナス + 卒業ボーナス + SM"
             ),
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v4 | Powered by DexScreener + RugCheck"},
+            "footer": {"text": "Sol Screener v5.2 | DexScreener + RugCheck + BirdEye"},
         }
 
-        embeds = [summary_embed]
+        embeds = [legend_embed]
 
         # ── 各プロジェクトの Embed ──
-        for p in projects[:10]:  # Discord は 10 embeds まで
+        for p in projects[:9]:  # 凡例 + 9件 = 10 embeds
             safety = (safety_results or {}).get(p.token_address, {})
             sm = (smart_money_results or {}).get(p.token_address, {})
             embed = self._build_project_embed(p, safety, sm)
@@ -96,7 +139,7 @@ class Notifier:
                 await asyncio.sleep(1)
 
     # ================================================================
-    # Pump.fun 卒業通知（特別フォーマット）
+    # 2. Pump.fun 卒業通知（紫色）
     # ================================================================
     async def send_graduation_alert(
         self,
@@ -127,25 +170,10 @@ class Notifier:
             "",
         ]
 
+        # 安全性情報
         if safety:
-            warnings = safety.get("warnings", [])
-            if warnings:
-                desc_lines.append(f"**安全性** {risk_emoji}")
-                for w in warnings[:5]:
-                    desc_lines.append(f"  {w}")
-            else:
-                desc_lines.append(f"**安全性** {risk_emoji} チェック済み・問題なし")
-
-            if safety.get("top_holders_pct") is not None:
-                desc_lines.append(
-                    f"👥 Top10ホルダー: `{safety['top_holders_pct']:.1f}%`"
-                )
-            if safety.get("mint_authority"):
-                mint_status = "❌ 未放棄" if safety["mint_authority"] != "None" else "✅ 放棄済み"
-                desc_lines.append(f"🔑 ミント権限: {mint_status}")
-            if safety.get("lp_locked") is not None:
-                lp_status = "✅ ロック済み" if safety["lp_locked"] else "❌ 未ロック"
-                desc_lines.append(f"🔒 LP: {lp_status}")
+            desc_lines.append(f"**🛡️ 安全性チェック** {risk_emoji}")
+            self._append_safety_lines(desc_lines, safety)
 
         desc_lines.append("")
         desc_lines.append(f"🔗 {links}")
@@ -155,14 +183,20 @@ class Notifier:
             "description": "\n".join(desc_lines),
             "color": self.COLOR_PURPLE,
             "thumbnail": {"url": f"https://dd.dexscreener.com/ds-data/tokens/solana/{addr}.png"},
-            "footer": {"text": f"DEX: {project.dex} | Score: {project.total_score:.1f}/100"},
+            "footer": {
+                "text": (
+                    f"Rank: {_rank_label(project.total_score)} | "
+                    f"Score: {project.total_score:.1f}/100 | "
+                    f"DEX: {project.dex}"
+                )
+            },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # ラグプル警告通知
+    # 3. 危険トークン警告（赤色）
     # ================================================================
     async def send_danger_alert(
         self,
@@ -179,9 +213,10 @@ class Notifier:
         desc_lines = [
             f"**{project.name}** (`{project.symbol}`) に重大なリスクが検出されました",
             "",
+            "**検出されたリスク:**",
         ]
         for w in warnings:
-            desc_lines.append(f"  {w}")
+            desc_lines.append(f"  ❌ {w}")
 
         desc_lines.append("")
         desc_lines.append(
@@ -190,17 +225,17 @@ class Notifier:
         )
 
         embed = {
-            "title": f"⚠️ 危険トークン検出: {project.symbol}",
+            "title": f"⚠️ 危険トークン: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_RED,
-            "footer": {"text": "Sol Screener v4 | 安全性チェック"},
+            "footer": {"text": "Sol Screener v5.2 | このトークンは自動除外されました"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # スマートマネー通知
+    # 4. スマートマネー通知（金色）
     # ================================================================
     async def send_smart_money_alert(
         self,
@@ -239,84 +274,89 @@ class Notifier:
         )
 
         embed = {
-            "title": f"🧠 Smart Money: {project.symbol}",
+            "title": f"🧠 Smart Money 検知: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_GOLD,
-            "footer": {"text": "Sol Screener v4 | Smart Money Tracker"},
+            "footer": {"text": "Sol Screener v5.2 | Smart Money Tracker"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # エアドロップ通知
+    # 5. エアドロップ通知（マルチチェーン対応）
     # ================================================================
     async def send_airdrop_report(self, airdrops: list, title: str = "✈️ エアドロップ情報"):
         """エアドロップ情報を Discord Embed で通知（マルチチェーン対応）"""
         if not self.webhook_url or not airdrops:
             return
 
-        # チェーン別に分類
+        # チェーン別・カテゴリ別に集計
         by_chain = {}
+        by_cat = {}
         for a in airdrops:
             chain = getattr(a, 'chain', 'multi') or 'multi'
             by_chain.setdefault(chain, []).append(a)
-
-        # カテゴリ別に分類
-        by_cat = {}
-        for a in airdrops:
             by_cat.setdefault(a.category or "other", []).append(a)
 
         cat_emoji = {
             "defi": "💰", "gamefi": "🎮", "nft": "🖼️",
             "infra": "🔧", "social": "💬", "l2": "⛓️", "other": "📦",
         }
-
         chain_emoji = {
             "solana": "◎", "ethereum": "⟠", "arbitrum": "🔵",
             "base": "🔷", "berachain": "🐻", "monad": "🟣",
             "scroll": "📜", "linea": "🌐", "blast": "💥", "multi": "🌍",
         }
 
-        # サマリー Embed
-        from datetime import datetime, timezone
-        chain_lines = []
-        for c, items in sorted(by_chain.items()):
-            ce = chain_emoji.get(c, '🔗')
-            chain_lines.append(f"{ce} **{c.upper()}**: {len(items)}件")
-        cat_lines = []
-        for c, items in sorted(by_cat.items()):
-            ce = cat_emoji.get(c, '📦')
-            cat_lines.append(f"{ce} **{c.upper()}**: {len(items)}件")
+        # 上位チェーン5つ
+        top_chains = sorted(by_chain.items(), key=lambda x: -len(x[1]))[:5]
+        chain_lines = [
+            f"{chain_emoji.get(c, '🔗')} **{c.upper()}**: {len(items)}件"
+            for c, items in top_chains
+        ]
+        cat_lines = [
+            f"{cat_emoji.get(c, '📦')} **{c.upper()}**: {len(items)}件"
+            for c, items in sorted(by_cat.items(), key=lambda x: -len(x[1]))
+        ]
 
+        # サマリー Embed
         summary = {
             "title": title,
             "description": (
-                f"**{len(airdrops)}件**のエアドロップ候補を検出\n"
+                f"**{len(airdrops)}件**のエアドロップ候補\n"
                 f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                "**■ 色分けルール:**\n"
+                "🟢 緑 = 確度75%+ (高確度)\n"
+                "🟡 黄 = 確度50-74% (中確度)\n"
+                "⚪ グレー = 確度50%未満\n\n"
+                "**■ 確度の基準:**\n"
+                "キュレーション済み(+20) + TVL規模(+30) + トークン未発行(+20) + "
+                "VC支援(+10) + コミュニティ規模(+10) + 期間限定(+10)\n\n"
                 f"**チェーン別:**\n" + "\n".join(chain_lines) + "\n\n"
                 f"**カテゴリ別:**\n" + "\n".join(cat_lines)
             ),
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v5 | Multi-Chain Airdrop Scanner"},
+            "footer": {"text": "Sol Screener v5.2 | Multi-Chain Airdrop Scanner"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         embeds = [summary]
 
-        # 上位エアドロを個別 Embed で通知（確度順、最大9件）
+        # 上位エアドロを個別 Embed で通知（最大9件）
         for a in airdrops[:9]:
-            conf_bar = "🟢" if a.confidence >= 70 else "🟡" if a.confidence >= 50 else "🔴"
+            conf_bar = _score_bar(a.confidence)
             emoji = cat_emoji.get(a.category, "📦")
+            chain_label = getattr(a, 'chain', 'multi') or 'multi'
+            ch_e = chain_emoji.get(chain_label, '🔗')
 
             desc_lines = []
             if a.description:
                 desc_lines.append(a.description[:200])
             desc_lines.append("")
-            desc_lines.append(f"{conf_bar} 確度: **{a.confidence}%** | ステータス: `{a.status}`")
-            chain_label = getattr(a, 'chain', 'multi') or 'multi'
-            ch_e = chain_emoji.get(chain_label, '🔗')
-            desc_lines.append(f"{ch_e} チェーン: `{chain_label}` | 📂 カテゴリ: `{a.category}` | ソース: `{a.source}`")
+            desc_lines.append(f"**確度: {a.confidence}%** `{conf_bar}`")
+            desc_lines.append(f"{ch_e} チェーン: `{chain_label}` | 📂 カテゴリ: `{a.category}`")
+            desc_lines.append(f"📡 ソース: `{a.source}` | 📌 ステータス: `{a.status}`")
 
             if a.estimated_value:
                 desc_lines.append(f"💰 推定規模: `{a.estimated_value}`")
@@ -333,7 +373,7 @@ class Notifier:
             elif a.confidence >= 50:
                 color = self.COLOR_YELLOW
             else:
-                color = 0x95A5A6  # グレー
+                color = self.COLOR_GREY
 
             embed = {
                 "title": f"{emoji} {a.name}",
@@ -343,7 +383,7 @@ class Notifier:
             }
             embeds.append(embed)
 
-        # Discord は 1 メッセージ 10 embeds まで → 分割送信
+        # 分割送信
         for i in range(0, len(embeds), 10):
             chunk = embeds[i:i + 10]
             await self._send_webhook({"embeds": chunk})
@@ -351,7 +391,7 @@ class Notifier:
                 await asyncio.sleep(1)
 
     # ================================================================
-    # 日次レポート
+    # 6. 日次レポート（青色）
     # ================================================================
     async def send_daily_report(self, report_text: str):
         """日次レポートを送信"""
@@ -359,13 +399,13 @@ class Notifier:
             "title": "📊 日次レポート",
             "description": report_text[:4000],
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v4"},
+            "footer": {"text": "Sol Screener v5.2 | Daily Report"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 汎用テキスト通知
+    # 7. 汎用テキスト通知（青色）
     # ================================================================
     async def send_text(self, text: str, title: str = "ℹ️ 通知"):
         """シンプルなテキスト通知"""
@@ -389,7 +429,9 @@ class Notifier:
         """プロジェクト用 Embed を構築"""
         addr = project.token_address
         risk_emoji = self._risk_emoji(safety)
-        grad_badge = " 🎓" if project.is_graduated else ""
+        grad_badge = " 🎓卒業" if project.is_graduated else ""
+        rank = _rank_label(project.total_score)
+        bar = _score_bar(project.total_score)
 
         links = (
             f"[DexScreener]({_dexscreener_url(addr)}) | "
@@ -435,7 +477,9 @@ class Notifier:
         safety_lines = []
         if safety:
             if safety.get("rugcheck_score") is not None:
-                safety_lines.append(f"RC Score: `{safety['rugcheck_score']}`")
+                rc = safety["rugcheck_score"]
+                rc_label = "Good" if rc >= 800 else "OK" if rc >= 400 else "Risk"
+                safety_lines.append(f"RugCheck: `{rc}` ({rc_label})")
             if safety.get("mint_authority"):
                 mint_s = "✅放棄" if safety["mint_authority"] == "None" else "❌未放棄"
                 safety_lines.append(f"Mint: {mint_s}")
@@ -443,7 +487,9 @@ class Notifier:
                 lp_s = "✅ロック" if safety["lp_locked"] else "❌未ロック"
                 safety_lines.append(f"LP: {lp_s}")
             if safety.get("top_holders_pct") is not None:
-                safety_lines.append(f"Top10: `{safety['top_holders_pct']:.1f}%`")
+                th = safety["top_holders_pct"]
+                th_label = "✅" if th < 30 else "⚠️" if th < 50 else "❌"
+                safety_lines.append(f"Top10: `{th:.1f}%` {th_label}")
 
         if safety_lines:
             fields.append({
@@ -470,18 +516,17 @@ class Notifier:
         })
 
         # カラー決定
-        if project.total_score >= 70:
+        if project.is_graduated:
+            color = self.COLOR_PURPLE
+        elif project.total_score >= 70:
             color = self.COLOR_GREEN
         elif project.total_score >= 40:
             color = self.COLOR_YELLOW
         else:
             color = self.COLOR_RED
 
-        if project.is_graduated:
-            color = self.COLOR_PURPLE
-
         embed = {
-            "title": f"#{projects_rank(project)} {project.symbol}{grad_badge} — Score: {project.total_score:.1f}/100",
+            "title": f"[{rank}] {project.symbol}{grad_badge} — {project.total_score:.1f}/100 `{bar}`",
             "description": f"**{project.name}** | DEX: `{project.dex}`",
             "color": color,
             "fields": fields,
@@ -492,6 +537,28 @@ class Notifier:
         }
 
         return embed
+
+    def _append_safety_lines(self, lines: list, safety: dict):
+        """安全性情報をdesc_linesに追加"""
+        warnings = safety.get("warnings", [])
+        if warnings:
+            for w in warnings[:5]:
+                lines.append(f"  ⚠️ {w}")
+        else:
+            lines.append("  ✅ 問題なし")
+
+        if safety.get("rugcheck_score") is not None:
+            rc = safety["rugcheck_score"]
+            rc_label = "Good" if rc >= 800 else "OK" if rc >= 400 else "Risk"
+            lines.append(f"  RugCheck: `{rc}` ({rc_label})")
+        if safety.get("top_holders_pct") is not None:
+            lines.append(f"  👥 Top10ホルダー: `{safety['top_holders_pct']:.1f}%`")
+        if safety.get("mint_authority"):
+            mint_status = "✅ 放棄済み" if safety["mint_authority"] == "None" else "❌ 未放棄"
+            lines.append(f"  🔑 ミント権限: {mint_status}")
+        if safety.get("lp_locked") is not None:
+            lp_status = "✅ ロック済み" if safety["lp_locked"] else "❌ 未ロック"
+            lines.append(f"  🔒 LP: {lp_status}")
 
     @staticmethod
     def _risk_emoji(safety: Optional[dict]) -> str:
@@ -523,17 +590,5 @@ class Notifier:
         if not self.webhook_url:
             return
         await self._send_webhook({"content": text[:2000]})
-
-
-def projects_rank(project: SolanaProject) -> str:
-    """スコアに基づくランク表示"""
-    s = project.total_score
-    if s >= 80:
-        return "S"
-    elif s >= 60:
-        return "A"
-    elif s >= 40:
-        return "B"
-    elif s >= 20:
-        return "C"
-    return "D"
+"""
+"""
