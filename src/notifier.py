@@ -252,9 +252,15 @@ class Notifier:
     # エアドロップ通知
     # ================================================================
     async def send_airdrop_report(self, airdrops: list, title: str = "✈️ エアドロップ情報"):
-        """エアドロップ情報を Discord Embed で通知"""
+        """エアドロップ情報を Discord Embed で通知（マルチチェーン対応）"""
         if not self.webhook_url or not airdrops:
             return
+
+        # チェーン別に分類
+        by_chain = {}
+        for a in airdrops:
+            chain = getattr(a, 'chain', 'multi') or 'multi'
+            by_chain.setdefault(chain, []).append(a)
 
         # カテゴリ別に分類
         by_cat = {}
@@ -263,23 +269,36 @@ class Notifier:
 
         cat_emoji = {
             "defi": "💰", "gamefi": "🎮", "nft": "🖼️",
-            "infra": "🔧", "social": "💬", "other": "📦",
+            "infra": "🔧", "social": "💬", "l2": "⛓️", "other": "📦",
+        }
+
+        chain_emoji = {
+            "solana": "◎", "ethereum": "⟠", "arbitrum": "🔵",
+            "base": "🔷", "berachain": "🐻", "monad": "🟣",
+            "scroll": "📜", "linea": "🌐", "blast": "💥", "multi": "🌍",
         }
 
         # サマリー Embed
         from datetime import datetime, timezone
+        chain_lines = []
+        for c, items in sorted(by_chain.items()):
+            ce = chain_emoji.get(c, '🔗')
+            chain_lines.append(f"{ce} **{c.upper()}**: {len(items)}件")
+        cat_lines = []
+        for c, items in sorted(by_cat.items()):
+            ce = cat_emoji.get(c, '📦')
+            cat_lines.append(f"{ce} **{c.upper()}**: {len(items)}件")
+
         summary = {
             "title": title,
             "description": (
                 f"**{len(airdrops)}件**のエアドロップ候補を検出\n"
                 f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                + "\n".join(
-                    f"{cat_emoji.get(c, '📦')} **{c.upper()}**: {len(items)}件"
-                    for c, items in sorted(by_cat.items())
-                )
+                f"**チェーン別:**\n" + "\n".join(chain_lines) + "\n\n"
+                f"**カテゴリ別:**\n" + "\n".join(cat_lines)
             ),
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v4 | Airdrop Scanner"},
+            "footer": {"text": "Sol Screener v5 | Multi-Chain Airdrop Scanner"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -295,7 +314,9 @@ class Notifier:
                 desc_lines.append(a.description[:200])
             desc_lines.append("")
             desc_lines.append(f"{conf_bar} 確度: **{a.confidence}%** | ステータス: `{a.status}`")
-            desc_lines.append(f"📂 カテゴリ: `{a.category}` | ソース: `{a.source}`")
+            chain_label = getattr(a, 'chain', 'multi') or 'multi'
+            ch_e = chain_emoji.get(chain_label, '🔗')
+            desc_lines.append(f"{ch_e} チェーン: `{chain_label}` | 📂 カテゴリ: `{a.category}` | ソース: `{a.source}`")
 
             if a.estimated_value:
                 desc_lines.append(f"💰 推定規模: `{a.estimated_value}`")

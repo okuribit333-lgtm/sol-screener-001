@@ -1,14 +1,17 @@
 """
-エアドロップ情報自動収集 v4.1 — 7ソース対応
+エアドロップ情報自動収集 v5.0 — マルチチェーン 10ソース対応
 
 データソース:
-  1. DeFiLlama API — Solanaプロトコル（トークン未発行 = エアドロ期待）
-  2. DeFiLlama API — GameFi/ゲーム系プロトコル特化
-  3. CoinGecko API — Solanaカテゴリの新規・低MC トークン（ポイント制検出）
-  4. Airdrops.io スクレイピング — Solana関連エアドロ
-  5. AirdropAlert.com スクレイピング — Solana専用ページ
-  6. 手動キュレーション — 主要プロジェクトの既知エアドロ情報
-  7. Twitter/Nitter 監視 — プロトコル公式のエアドロ言及検出
+  1. DeFiLlama API — 全チェーン DeFi プロトコル（トークン未発行 = エアドロ期待）
+  2. DeFiLlama API — GameFi / ゲーム系プロトコル特化（全チェーン）
+  3. CoinGecko API — 新規・低MC トークン（ポイント制検出）
+  4. AirdropAlert.com スクレイピング — 全チェーン対応エアドロ
+  5. Airdrops.io スクレイピング — 全チェーン対応エアドロ
+  6. CryptoTotem スクレイピング — Retrodrop / テストネット情報
+  7. DeFiLlama Raises API — 最近の資金調達プロジェクト（エアドロ予測）
+  8. 手動キュレーション — 2026年注目エアドロ（マルチチェーン）
+  9. Twitter/Nitter 監視 — プロトコル公式のエアドロ言及検出
+  10. Gate.io / MEXC ニュース — 取引所のエアドロ情報
 
 全て無料API / スクレイピングで動作（APIキー不要）
 """
@@ -32,25 +35,51 @@ logger = logging.getLogger(__name__)
 class AirdropInfo:
     """エアドロップ情報"""
     name: str
-    platform: str = "solana"
-    category: str = ""          # "defi" / "gamefi" / "nft" / "infra" / "social"
+    chain: str = "multi"          # "solana" / "ethereum" / "arbitrum" / "base" / "multi" etc.
+    category: str = ""            # "defi" / "gamefi" / "nft" / "infra" / "social" / "l2"
     description: str = ""
     url: str = ""
-    status: str = "active"      # active / upcoming / ended / speculative
+    status: str = "active"        # active / upcoming / ended / speculative
     estimated_value: str = ""
     requirements: list = field(default_factory=list)
     source: str = ""
-    confidence: int = 50        # 0-100: エアドロ確度スコア
+    confidence: int = 50          # 0-100: エアドロ確度スコア
 
     def __repr__(self):
-        return f"<Airdrop: {self.name} | {self.category} | {self.status} | conf={self.confidence}>"
+        return f"<Airdrop: {self.name} | {self.chain} | {self.category} | conf={self.confidence}>"
+
+
+# ============================================================
+# チェーン判定ヘルパー
+# ============================================================
+CHAIN_ALIASES = {
+    "Solana": "solana", "Ethereum": "ethereum", "Arbitrum": "arbitrum",
+    "Optimism": "optimism", "Base": "base", "Polygon": "polygon",
+    "BSC": "bsc", "Binance": "bsc", "Avalanche": "avalanche",
+    "Sui": "sui", "Aptos": "aptos", "Sei": "sei",
+    "Cosmos": "cosmos", "Near": "near", "Fantom": "fantom",
+    "zkSync Era": "zksync", "Linea": "linea", "Scroll": "scroll",
+    "Blast": "blast", "Starknet": "starknet", "Manta": "manta",
+    "Mantle": "mantle", "Mode": "mode", "Berachain": "berachain",
+    "Monad": "monad", "MegaETH": "megaeth",
+}
+
+
+def _detect_chain(chains: list[str]) -> str:
+    """チェーンリストから主要チェーンを判定"""
+    if not chains:
+        return "multi"
+    for c in chains:
+        if c in CHAIN_ALIASES:
+            return CHAIN_ALIASES[c]
+    return chains[0].lower() if chains else "multi"
 
 
 # ============================================================
 # メインスキャナー
 # ============================================================
 class AirdropScanner:
-    """エアドロップ情報を7ソースから収集"""
+    """エアドロップ情報を10ソースから収集（マルチチェーン対応）"""
 
     # ── Nitter インスタンス ──
     NITTER_INSTANCES = [
@@ -63,47 +92,59 @@ class AirdropScanner:
     AIRDROP_KEYWORDS = [
         "airdrop", "claim", "token distribution", "retroactive",
         "points program", "rewards", "season", "drop", "genesis",
-        "farming", "quest", "earn", "incentive",
+        "farming", "quest", "earn", "incentive", "testnet",
     ]
 
-    # ── Solana エコシステム監視リスト（大幅拡充） ──
+    # ── 注目プロトコル監視リスト（マルチチェーン） ──
 
-    # DeFi 系
-    DEFI_PROTOCOLS = [
+    # Solana DeFi 系
+    SOL_DEFI = [
         "jupiter", "marginfi", "kamino", "drift", "tensor",
         "jito", "sanctum", "phantom", "backpack", "zeta",
         "parcl", "meteora", "marinade", "raydium", "orca",
-        "solend", "hubble", "tulip", "francium", "port",
-        "mango", "openbook", "lifinity", "axiom", "hylo",
+        "solend", "mango", "lifinity", "axiom", "hylo",
         "vybe", "solayer", "flash", "symmetry", "hawksight",
     ]
 
-    # ゲーム / GameFi 系
+    # Ethereum / L2 DeFi 系
+    ETH_DEFI = [
+        "eigenlayer", "etherfi", "pendle", "morpho", "aave",
+        "lido", "renzo", "kelp", "puffer", "swell",
+        "ethena", "symbiotic", "karak", "mellow",
+    ]
+
+    # L2 / 新興チェーン
+    L2_CHAINS = [
+        "zksync", "linea", "scroll", "blast", "starknet",
+        "manta", "mantle", "mode", "berachain", "monad",
+        "megaeth", "abstract", "soneium", "taiko", "fuel",
+    ]
+
+    # ゲーム / GameFi 系（マルチチェーン）
     GAMEFI_PROTOCOLS = [
         "star atlas", "aurory", "defi land", "genopets",
-        "stepn", "nyan heroes", "br1 infinite", "photo finish",
-        "honeyland", "solpump", "mixmob", "mini royale",
-        "synergy land", "karate combat", "ev.io",
-        "portals", "solice", "solanium", "cryowar",
-        "monkeyball", "realy", "decimated",
+        "stepn", "nyan heroes", "pixels", "illuvium",
+        "big time", "shrapnel", "parallel", "gods unchained",
+        "axie infinity", "the sandbox", "decentraland",
+        "gala games", "immutable x", "ronin",
+        "treasure dao", "beam", "xai",
     ]
 
     # NFT / マーケットプレイス系
     NFT_PROTOCOLS = [
-        "magic eden", "tensor", "formfunction", "exchange art",
-        "hyperspace", "solanart", "coral cube",
+        "magic eden", "tensor", "opensea", "blur",
+        "foundation", "zora", "manifold",
     ]
 
     # インフラ / ツール系
     INFRA_PROTOCOLS = [
-        "helius", "triton", "quicknode", "ironforge",
-        "shyft", "underdog", "dialect", "sphere",
-        "streamflow", "squads", "realms", "mean finance",
-        "openloop", "assisterr", "grass", "krain",
+        "helius", "grass", "openloop", "assisterr", "krain",
+        "layerzero", "wormhole", "across", "hop",
+        "chainlink", "pyth", "switchboard",
     ]
 
-    # 全プロトコル統合リスト
-    ALL_PROTOCOLS = DEFI_PROTOCOLS + GAMEFI_PROTOCOLS + NFT_PROTOCOLS + INFRA_PROTOCOLS
+    # Twitter監視用統合リスト
+    ALL_PROTOCOLS = SOL_DEFI[:10] + ETH_DEFI[:8] + L2_CHAINS[:8] + GAMEFI_PROTOCOLS[:8] + NFT_PROTOCOLS[:4]
 
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
@@ -112,22 +153,26 @@ class AirdropScanner:
     # メイン: 全ソーススキャン
     # ============================================================
     async def scan_all(self) -> list[AirdropInfo]:
-        """全7ソースからエアドロ情報を収集"""
+        """全10ソースからエアドロ情報を収集（マルチチェーン）"""
         results = await asyncio.gather(
             self._source_defillama_defi(),
             self._source_defillama_gamefi(),
-            self._source_coingecko_solana(),
-            self._source_airdrops_io(),
+            self._source_coingecko(),
             self._source_airdropalert(),
+            self._source_airdrops_io(),
+            self._source_cryptototem(),
+            self._source_defillama_raises(),
             self._source_curated_list(),
             self._source_twitter(),
+            self._source_exchange_news(),
             return_exceptions=True,
         )
 
         all_airdrops = []
         source_names = [
             "DeFiLlama-DeFi", "DeFiLlama-GameFi", "CoinGecko",
-            "Airdrops.io", "AirdropAlert", "Curated", "Twitter",
+            "AirdropAlert", "Airdrops.io", "CryptoTotem",
+            "DeFiLlama-Raises", "Curated", "Twitter", "ExchangeNews",
         ]
 
         for i, r in enumerate(results):
@@ -153,10 +198,10 @@ class AirdropScanner:
         return unique
 
     # ============================================================
-    # ソース 1: DeFiLlama — DeFi プロトコル（トークン未発行）
+    # ソース 1: DeFiLlama — 全チェーン DeFi（トークン未発行）
     # ============================================================
     async def _source_defillama_defi(self) -> list[AirdropInfo]:
-        """DeFiLlama: Solana DeFiプロトコルでトークン未発行 → エアドロ期待"""
+        """DeFiLlama: 全チェーンのDeFiプロトコルでトークン未発行 → エアドロ期待"""
         airdrops = []
         try:
             url = "https://api.llama.fi/protocols"
@@ -167,7 +212,7 @@ class AirdropScanner:
 
             for protocol in data:
                 chains = protocol.get("chains", [])
-                if "Solana" not in chains:
+                if not chains:
                     continue
 
                 name = protocol.get("name", "")
@@ -178,29 +223,41 @@ class AirdropScanner:
                 # トークン未発行判定
                 has_token = symbol and symbol != "-" and symbol.strip() != ""
 
-                if not has_token and tvl > 500_000:
+                # TVL $1M以上 & トークン未発行
+                if not has_token and tvl > 1_000_000:
+                    chain = _detect_chain(chains)
+
                     # カテゴリ判定
                     cat = "defi"
                     if any(g in category for g in ["game", "gaming", "play"]):
                         cat = "gamefi"
                     elif any(n in category for n in ["nft", "collectible"]):
                         cat = "nft"
+                    elif any(i in category for i in ["bridge", "cross-chain", "oracle"]):
+                        cat = "infra"
 
                     # 確度スコア: TVLが高いほど確度UP
                     conf = 40
-                    if tvl > 50_000_000:
+                    if tvl > 100_000_000:
+                        conf = 90
+                    elif tvl > 50_000_000:
                         conf = 85
                     elif tvl > 10_000_000:
                         conf = 75
                     elif tvl > 5_000_000:
                         conf = 65
-                    elif tvl > 1_000_000:
+                    elif tvl > 2_000_000:
                         conf = 55
+
+                    chain_display = ", ".join(chains[:3])
+                    if len(chains) > 3:
+                        chain_display += f" +{len(chains)-3}"
 
                     airdrops.append(AirdropInfo(
                         name=name,
+                        chain=chain,
                         category=cat,
-                        description=f"TVL: ${tvl:,.0f} | カテゴリ: {category} | トークン未発行 → エアドロ期待",
+                        description=f"TVL: ${tvl:,.0f} | チェーン: {chain_display} | {category} | トークン未発行",
                         url=protocol.get("url", ""),
                         status="speculative",
                         estimated_value=f"TVL ${tvl / 1e6:.1f}M",
@@ -214,10 +271,10 @@ class AirdropScanner:
         return airdrops
 
     # ============================================================
-    # ソース 2: DeFiLlama — GameFi / ゲーム系特化
+    # ソース 2: DeFiLlama — GameFi / ゲーム系特化（全チェーン）
     # ============================================================
     async def _source_defillama_gamefi(self) -> list[AirdropInfo]:
-        """DeFiLlama: ゲーム系Solanaプロトコルを特化検出"""
+        """DeFiLlama: 全チェーンのゲーム系プロトコルを検出"""
         airdrops = []
         try:
             url = "https://api.llama.fi/protocols"
@@ -233,9 +290,6 @@ class AirdropScanner:
 
             for protocol in data:
                 chains = protocol.get("chains", [])
-                if "Solana" not in chains:
-                    continue
-
                 name = protocol.get("name", "")
                 category = protocol.get("category", "").lower()
                 desc = protocol.get("description", "").lower()
@@ -245,15 +299,14 @@ class AirdropScanner:
                 is_game = (
                     any(kw in category for kw in game_keywords)
                     or any(kw in desc for kw in game_keywords)
-                    or any(kw in name.lower() for kw in game_keywords)
                 )
 
                 if not is_game:
                     continue
 
                 has_token = symbol and symbol != "-" and symbol.strip() != ""
+                chain = _detect_chain(chains)
 
-                # ゲーム系はトークン発行済みでもエアドロの可能性あり（シーズン報酬等）
                 status = "speculative" if not has_token else "upcoming"
                 conf = 60 if not has_token else 35
 
@@ -264,9 +317,10 @@ class AirdropScanner:
 
                 airdrops.append(AirdropInfo(
                     name=f"{name} (GameFi)",
+                    chain=chain,
                     category="gamefi",
                     description=(
-                        f"ゲーム系プロトコル | TVL: ${tvl:,.0f} | "
+                        f"ゲーム系 | TVL: ${tvl:,.0f} | "
                         f"{'トークン未発行' if not has_token else f'${symbol}'} | "
                         f"{protocol.get('description', '')[:100]}"
                     ),
@@ -283,169 +337,83 @@ class AirdropScanner:
         return airdrops
 
     # ============================================================
-    # ソース 3: CoinGecko — Solana カテゴリ新規トークン
+    # ソース 3: CoinGecko — 新規トークン（全チェーン）
     # ============================================================
-    async def _source_coingecko_solana(self) -> list[AirdropInfo]:
-        """CoinGecko: Solanaエコシステムの新規・低MCトークンからエアドロ候補を検出"""
+    async def _source_coingecko(self) -> list[AirdropInfo]:
+        """CoinGecko: 新規・低MCトークンからエアドロ候補を検出"""
         airdrops = []
+        try:
+            # 複数カテゴリを検索
+            categories = [
+                ("solana-ecosystem", "solana"),
+                ("arbitrum-ecosystem", "arbitrum"),
+                ("base-ecosystem", "base"),
+                ("layer-2", "l2"),
+            ]
 
-        categories = [
-            ("solana-ecosystem", "defi"),
-            ("gaming", "gamefi"),
-            ("play-to-earn", "gamefi"),
-            ("non-fungible-tokens-nft", "nft"),
-            ("move-to-earn", "gamefi"),
-            ("metaverse", "gamefi"),
-        ]
+            for cat_id, chain_label in categories:
+                url = (
+                    f"https://api.coingecko.com/api/v3/coins/markets"
+                    f"?vs_currency=usd&category={cat_id}"
+                    f"&order=market_cap_asc&per_page=30&page=1"
+                )
+                try:
+                    async with self.session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=15),
+                        headers={"Accept": "application/json"},
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
 
-        for cat_id, cat_label in categories:
-            try:
-                url = f"https://api.coingecko.com/api/v3/coins/markets"
-                params = {
-                    "vs_currency": "usd",
-                    "category": cat_id,
-                    "order": "market_cap_asc",
-                    "per_page": 50,
-                    "page": 1,
-                    "sparkline": "false",
-                }
-                async with self.session.get(
-                    url, params=params, timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
+                    for coin in data:
+                        name = coin.get("name", "")
+                        symbol = coin.get("symbol", "").upper()
+                        mc = coin.get("market_cap", 0) or 0
+                        vol = coin.get("total_volume", 0) or 0
 
-                for coin in data:
-                    name = coin.get("name", "")
-                    symbol = coin.get("symbol", "").upper()
-                    mcap = coin.get("market_cap", 0) or 0
+                        # ポイント制・エアドロ系の特徴を検出
+                        name_lower = name.lower()
+                        is_airdrop_related = any(
+                            kw in name_lower for kw in
+                            ["point", "reward", "earn", "season", "quest"]
+                        )
 
-                    # Solana関連かチェック（CoinGeckoのカテゴリは複数チェーン含む）
-                    name_lower = name.lower()
-                    is_likely_solana = any(
-                        kw in name_lower
-                        for kw in ["sol", "solana", "raydium", "serum", "phantom"]
-                    ) or cat_id == "solana-ecosystem"
+                        if mc < 50_000_000 and vol > 10_000:
+                            conf = 30
+                            if is_airdrop_related:
+                                conf += 20
+                            if mc < 5_000_000:
+                                conf += 10
 
-                    if not is_likely_solana:
-                        continue
-
-                    # 低時価総額 = まだ初期 = エアドロ可能性
-                    if mcap > 0 and mcap < 50_000_000:
-                        conf = 30
-                        if mcap < 1_000_000:
-                            conf = 50
-                        elif mcap < 5_000_000:
-                            conf = 40
-
-                        airdrops.append(AirdropInfo(
-                            name=f"{name} ({symbol})",
-                            category=cat_label,
-                            description=(
-                                f"MC: ${mcap:,.0f} | "
-                                f"カテゴリ: {cat_id} | "
-                                f"低MC → ポイント制/エアドロの可能性"
-                            ),
-                            url=f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
-                            status="speculative",
-                            estimated_value=f"MC ${mcap / 1e6:.1f}M",
-                            source="coingecko",
-                            confidence=conf,
-                        ))
+                            airdrops.append(AirdropInfo(
+                                name=f"{name} ({symbol})",
+                                chain=chain_label,
+                                category="defi",
+                                description=f"MC: ${mc:,.0f} | Vol: ${vol:,.0f} | {chain_label}",
+                                status="speculative",
+                                estimated_value=f"MC ${mc / 1e6:.1f}M",
+                                source="coingecko",
+                                confidence=min(80, conf),
+                            ))
+                except Exception:
+                    continue
 
                 await asyncio.sleep(1.5)  # CoinGecko レート制限対策
 
-            except Exception as e:
-                logger.debug(f"CoinGecko [{cat_id}] error: {e}")
+        except Exception as e:
+            logger.debug(f"CoinGecko error: {e}")
 
         return airdrops
 
     # ============================================================
-    # ソース 4: Airdrops.io スクレイピング
-    # ============================================================
-    async def _source_airdrops_io(self) -> list[AirdropInfo]:
-        """Airdrops.io: Solana関連のエアドロを取得"""
-        airdrops = []
-
-        pages = [
-            ("https://airdrops.io/speculative/", "speculative"),
-            ("https://airdrops.io/latest/", "active"),
-        ]
-
-        solana_keywords = [
-            "solana", "sol", "spl", "phantom", "jupiter",
-            "raydium", "serum", "anchor", "metaplex",
-        ]
-
-        for page_url, status in pages:
-            try:
-                async with self.session.get(
-                    page_url,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    html = await resp.text()
-
-                soup = BeautifulSoup(html, "html.parser")
-
-                # 複数のセレクタパターンで取得
-                cards = soup.select(
-                    ".airdrop-card, .card, article, "
-                    ".airdrop-list-item, .airdrop-item, "
-                    "[class*='airdrop'], [class*='card']"
-                )
-
-                for card in cards[:40]:
-                    title_el = card.select_one(
-                        "h3, h2, h4, .title, .card-title, "
-                        "[class*='title'], [class*='name']"
-                    )
-                    desc_el = card.select_one(
-                        "p, .description, .card-text, "
-                        "[class*='desc'], [class*='text']"
-                    )
-                    link_el = card.select_one("a[href]")
-
-                    if not title_el:
-                        continue
-
-                    name = title_el.get_text(strip=True)
-                    desc = desc_el.get_text(strip=True) if desc_el else ""
-                    link = link_el.get("href", "") if link_el else ""
-
-                    text = f"{name} {desc}".lower()
-                    is_solana = (
-                        any(kw in text for kw in solana_keywords)
-                        or any(p in text for p in self.ALL_PROTOCOLS)
-                    )
-
-                    if is_solana:
-                        airdrops.append(AirdropInfo(
-                            name=name,
-                            category="defi",
-                            description=desc[:200],
-                            url=link if link.startswith("http") else f"https://airdrops.io{link}",
-                            status=status,
-                            source="airdrops.io",
-                            confidence=65,
-                        ))
-
-            except Exception as e:
-                logger.debug(f"Airdrops.io [{page_url}] error: {e}")
-
-        return airdrops
-
-    # ============================================================
-    # ソース 5: AirdropAlert.com スクレイピング
+    # ソース 4: AirdropAlert.com スクレイピング（全チェーン）
     # ============================================================
     async def _source_airdropalert(self) -> list[AirdropInfo]:
-        """AirdropAlert.com: Solana専用ページからエアドロ情報を取得"""
+        """AirdropAlert: 全チェーンのエアドロ情報を取得"""
         airdrops = []
         try:
-            url = "https://airdropalert.com/airdrops/solana/"
+            url = "https://airdropalert.com/new-airdrops"
             async with self.session.get(
                 url,
                 timeout=aiohttp.ClientTimeout(total=15),
@@ -457,43 +425,50 @@ class AirdropScanner:
 
             soup = BeautifulSoup(html, "html.parser")
 
-            # カード要素を取得
-            cards = soup.select(
-                ".airdrop-card, .card, article, "
-                "[class*='airdrop'], [class*='listing'], "
-                ".row, .col"
-            )
+            # エアドロカード要素を取得
+            cards = soup.select("div.airdrop-card, div.card, div[class*='airdrop']")
+            if not cards:
+                # 代替: h4タグからプロジェクト名を取得
+                cards = soup.select("h4, h3, .project-name")
 
             for card in cards[:30]:
-                title_el = card.select_one(
-                    "h3, h2, h4, .title, [class*='title'], [class*='name'], strong"
-                )
-                desc_el = card.select_one("p, .description, [class*='desc']")
-                link_el = card.select_one("a[href]")
-
-                if not title_el:
+                text = card.get_text(strip=True)
+                if not text or len(text) < 3:
                     continue
 
-                name = title_el.get_text(strip=True)
-                if len(name) < 3 or len(name) > 100:
+                # プロジェクト名を抽出
+                name = text.split("⇆")[0].split("KYC")[0].split("APP")[0].split("OTH")[0].strip()
+                if len(name) > 60:
+                    name = name[:60]
+                if len(name) < 2:
                     continue
 
-                desc = desc_el.get_text(strip=True) if desc_el else ""
-                link = link_el.get("href", "") if link_el else ""
+                # 説明文を取得
+                desc_parts = text.replace(name, "").strip()[:150]
 
-                # ゲーム系判定
-                text = f"{name} {desc}".lower()
+                # チェーン判定
+                chain = "multi"
+                text_lower = text.lower()
+                for chain_name, chain_id in CHAIN_ALIASES.items():
+                    if chain_name.lower() in text_lower:
+                        chain = chain_id
+                        break
+
+                # カテゴリ判定
                 cat = "defi"
-                if any(kw in text for kw in ["game", "play", "earn", "nft", "metaverse"]):
+                if any(kw in text_lower for kw in ["game", "play", "nft game"]):
                     cat = "gamefi"
-                elif any(kw in text for kw in ["nft", "collectible", "art"]):
+                elif any(kw in text_lower for kw in ["nft", "collectible", "art"]):
                     cat = "nft"
+                elif any(kw in text_lower for kw in ["layer", "chain", "bridge", "oracle"]):
+                    cat = "infra"
 
                 airdrops.append(AirdropInfo(
                     name=name,
+                    chain=chain,
                     category=cat,
-                    description=desc[:200],
-                    url=link if link.startswith("http") else f"https://airdropalert.com{link}",
+                    description=desc_parts if desc_parts else "AirdropAlertで掲載中",
+                    url="https://airdropalert.com",
                     status="active",
                     source="airdropalert",
                     confidence=60,
@@ -505,219 +480,488 @@ class AirdropScanner:
         return airdrops
 
     # ============================================================
-    # ソース 6: 手動キュレーションリスト（既知の有力エアドロ）
+    # ソース 5: Airdrops.io スクレイピング（全チェーン）
+    # ============================================================
+    async def _source_airdrops_io(self) -> list[AirdropInfo]:
+        """Airdrops.io: 全チェーンのエアドロ情報を取得"""
+        airdrops = []
+        try:
+            url = "https://airdrops.io/"
+            async with self.session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            ) as resp:
+                if resp.status != 200:
+                    return airdrops
+                html = await resp.text()
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # エアドロ一覧を取得
+            items = soup.select("a[href*='/airdrop/'], .airdrop-item, .card")
+            if not items:
+                items = soup.select("h3, h4, .title")
+
+            for item in items[:30]:
+                text = item.get_text(strip=True)
+                if not text or len(text) < 3:
+                    continue
+
+                name = text[:60].strip()
+                if len(name) < 2:
+                    continue
+
+                href = item.get("href", "")
+                item_url = f"https://airdrops.io{href}" if href.startswith("/") else href
+
+                # チェーン判定
+                chain = "multi"
+                text_lower = text.lower()
+                for chain_name, chain_id in CHAIN_ALIASES.items():
+                    if chain_name.lower() in text_lower:
+                        chain = chain_id
+                        break
+
+                airdrops.append(AirdropInfo(
+                    name=name,
+                    chain=chain,
+                    category="defi",
+                    description="Airdrops.ioで掲載中",
+                    url=item_url if item_url else "https://airdrops.io",
+                    status="active",
+                    source="airdrops.io",
+                    confidence=55,
+                ))
+
+        except Exception as e:
+            logger.debug(f"Airdrops.io error: {e}")
+
+        return airdrops
+
+    # ============================================================
+    # ソース 6: CryptoTotem スクレイピング（Retrodrop / テストネット）
+    # ============================================================
+    async def _source_cryptototem(self) -> list[AirdropInfo]:
+        """CryptoTotem: Retrodrop / テストネット / エアドロ情報"""
+        airdrops = []
+        try:
+            url = "https://cryptototem.com/airdrops/"
+            async with self.session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            ) as resp:
+                if resp.status != 200:
+                    return airdrops
+                html = await resp.text()
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # テーブル行またはカード要素を取得
+            rows = soup.select("tr, .airdrop-item, .project-row")
+            if not rows:
+                rows = soup.select("a[href*='airdrop']")
+
+            for row in rows[:40]:
+                text = row.get_text(strip=True)
+                if not text or len(text) < 5:
+                    continue
+
+                # プロジェクト名を抽出
+                links = row.select("a")
+                name = ""
+                item_url = ""
+                for link in links:
+                    link_text = link.get_text(strip=True)
+                    if "airdrop" in link_text.lower() and len(link_text) > 3:
+                        name = link_text.replace(" airdrop", "").replace(" Airdrop", "").strip()
+                        href = link.get("href", "")
+                        item_url = f"https://cryptototem.com{href}" if href.startswith("/") else href
+                        break
+
+                if not name or len(name) < 2:
+                    continue
+
+                # 業界/カテゴリ判定
+                cat = "defi"
+                text_lower = text.lower()
+                if any(kw in text_lower for kw in ["gaming", "game"]):
+                    cat = "gamefi"
+                elif any(kw in text_lower for kw in ["nft", "collectible"]):
+                    cat = "nft"
+                elif any(kw in text_lower for kw in ["blockchain", "infrastructure", "oracle"]):
+                    cat = "infra"
+                elif any(kw in text_lower for kw in ["ai", "data", "machine learning"]):
+                    cat = "infra"
+
+                # チェーン判定
+                chain = "multi"
+                for chain_name, chain_id in CHAIN_ALIASES.items():
+                    if chain_name.lower() in text_lower:
+                        chain = chain_id
+                        break
+
+                # 資金調達額から確度を推定
+                conf = 55
+                if "$" in text:
+                    # 資金調達額が大きいほど確度UP
+                    import re as _re
+                    money_match = _re.search(r'\$(\d+(?:\.\d+)?)\s*[MB]', text)
+                    if money_match:
+                        amount = float(money_match.group(1))
+                        if "B" in text[money_match.end()-1:money_match.end()]:
+                            amount *= 1000
+                        if amount > 100:
+                            conf = 80
+                        elif amount > 20:
+                            conf = 70
+                        elif amount > 5:
+                            conf = 60
+
+                # Interest level判定
+                if "highest" in text_lower:
+                    conf = min(95, conf + 15)
+                elif "high" in text_lower:
+                    conf = min(90, conf + 10)
+                elif "medium" in text_lower:
+                    conf = min(80, conf + 5)
+
+                airdrops.append(AirdropInfo(
+                    name=name,
+                    chain=chain,
+                    category=cat,
+                    description=f"CryptoTotem掲載 | {text[:100]}",
+                    url=item_url if item_url else "https://cryptototem.com/airdrops/",
+                    status="active",
+                    source="cryptototem",
+                    confidence=conf,
+                ))
+
+        except Exception as e:
+            logger.debug(f"CryptoTotem error: {e}")
+
+        return airdrops
+
+    # ============================================================
+    # ソース 7: DeFiLlama Raises — 最近の資金調達（エアドロ予測）
+    # ============================================================
+    async def _source_defillama_raises(self) -> list[AirdropInfo]:
+        """DeFiLlama Raises: 最近資金調達したプロジェクト → トークン未発行ならエアドロ期待"""
+        airdrops = []
+        try:
+            url = "https://api.llama.fi/raises"
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return airdrops
+                data = await resp.json()
+
+            raises = data.get("raises", data) if isinstance(data, dict) else data
+            if not isinstance(raises, list):
+                return airdrops
+
+            # 直近の資金調達を確認
+            for raise_info in raises[:100]:
+                name = raise_info.get("name", "")
+                amount = raise_info.get("amount", 0) or 0
+                chains = raise_info.get("chains", [])
+                category = raise_info.get("category", "").lower()
+                date = raise_info.get("date", 0)
+
+                if not name or amount < 2_000_000:
+                    continue
+
+                chain = _detect_chain(chains) if chains else "multi"
+
+                # カテゴリ判定
+                cat = "defi"
+                if any(g in category for g in ["game", "gaming"]):
+                    cat = "gamefi"
+                elif any(n in category for n in ["nft"]):
+                    cat = "nft"
+                elif any(i in category for i in ["infrastructure", "bridge", "oracle"]):
+                    cat = "infra"
+                elif any(l in category for l in ["chain", "layer"]):
+                    cat = "l2"
+
+                # 確度: 資金調達額が大きいほどUP
+                conf = 45
+                if amount > 100_000_000:
+                    conf = 85
+                elif amount > 50_000_000:
+                    conf = 75
+                elif amount > 20_000_000:
+                    conf = 65
+                elif amount > 10_000_000:
+                    conf = 55
+
+                chain_display = ", ".join(chains[:3]) if chains else "不明"
+
+                airdrops.append(AirdropInfo(
+                    name=name,
+                    chain=chain,
+                    category=cat,
+                    description=f"資金調達: ${amount/1e6:.1f}M | チェーン: {chain_display} | {category}",
+                    url="",
+                    status="speculative",
+                    estimated_value=f"Raised ${amount/1e6:.1f}M",
+                    source="defillama-raises",
+                    confidence=conf,
+                ))
+
+        except Exception as e:
+            logger.debug(f"DeFiLlama Raises error: {e}")
+
+        return airdrops
+
+    # ============================================================
+    # ソース 8: 手動キュレーションリスト（2026年注目 マルチチェーン）
     # ============================================================
     async def _source_curated_list(self) -> list[AirdropInfo]:
-        """手動キュレーション: 2026年に期待される主要Solanaエアドロ"""
+        """手動キュレーション: 2026年に期待される主要エアドロ（マルチチェーン）"""
         curated = [
-            # DeFi 系
+            # ─── Solana DeFi ───
             AirdropInfo(
                 name="Jupiter (JUP) Season 3+",
-                category="defi",
+                chain="solana", category="defi",
                 description="Solana最大DEXアグリゲーター。Season 1で$616M配布。JUPステーキング・投票で対象。",
-                url="https://jup.ag",
-                status="upcoming",
+                url="https://jup.ag", status="upcoming",
                 requirements=["JUPステーキング", "ガバナンス投票", "DEX利用"],
-                source="curated",
-                confidence=90,
+                source="curated", confidence=90,
             ),
             AirdropInfo(
                 name="Meteora (MET) Season 2",
-                category="defi",
-                description="流動性プール特化。LP提供者にMETトークン配布。高ボリュームLP提供が有利。",
-                url="https://meteora.ag",
-                status="active",
+                chain="solana", category="defi",
+                description="流動性プール特化。LP提供者にMETトークン配布。",
+                url="https://meteora.ag", status="active",
                 requirements=["流動性提供", "高ボリュームプール参加"],
-                source="curated",
-                confidence=90,
-            ),
-            AirdropInfo(
-                name="Magic Eden (ME) Season 3",
-                category="nft",
-                description="Solana最大NFTマーケットプレイス。Season 3進行中。ガバナンス参加・クエスト完了で対象。",
-                url="https://magiceden.io",
-                status="active",
-                requirements=["MEウォレット", "ガバナンス参加", "クエスト完了"],
-                source="curated",
-                confidence=95,
+                source="curated", confidence=90,
             ),
             AirdropInfo(
                 name="Kamino (KMNO) Season 2+",
-                category="defi",
+                chain="solana", category="defi",
                 description="レンディング・ステーキング・LP。Season 1で1ウォレット平均$300配布。",
-                url="https://kamino.finance",
-                status="upcoming",
+                url="https://kamino.finance", status="upcoming",
                 requirements=["レンディング", "ステーキング", "LP提供"],
-                source="curated",
-                confidence=80,
+                source="curated", confidence=80,
             ),
             AirdropInfo(
                 name="Sanctum (CLOUD)",
-                category="defi",
-                description="リキッドステーキングインフラ。カスタムLST作成。ポイントプログラム進行中。",
-                url="https://sanctum.so",
-                status="active",
-                requirements=["SOLステーキング", "LST保有", "ポイント獲得"],
-                source="curated",
-                confidence=80,
-            ),
-            AirdropInfo(
-                name="Vybe Network",
-                category="infra",
-                description="Solanaミドルレイヤー。VybeSOL（リキッドステーキング）。トークン未発行。",
-                url="https://vybenetwork.com",
-                status="speculative",
-                requirements=["VybeSOL購入", "コミュニティ参加"],
-                source="curated",
-                confidence=70,
+                chain="solana", category="defi",
+                description="リキッドステーキングインフラ。ポイントプログラム進行中。",
+                url="https://sanctum.so", status="active",
+                requirements=["SOLステーキング", "LST保有"],
+                source="curated", confidence=80,
             ),
             AirdropInfo(
                 name="Axiom Trade",
-                category="defi",
+                chain="solana", category="defi",
                 description="Perp取引プロトコル。ポイントベースの報酬システム。",
-                url="https://axiom.trade",
-                status="active",
+                url="https://axiom.trade", status="active",
                 requirements=["Perp取引", "ポイント獲得"],
-                source="curated",
-                confidence=75,
-            ),
-            AirdropInfo(
-                name="Hylo",
-                category="defi",
-                description="SOLレバレッジ・ステーブルコイン利回り。ポイントシステム進行中。",
-                url="https://hylo.finance",
-                status="active",
-                requirements=["SOL預入", "ポイント獲得"],
-                source="curated",
-                confidence=70,
+                source="curated", confidence=75,
             ),
 
-            # ゲーム / GameFi 系
+            # ─── Ethereum / L2 DeFi ───
+            AirdropInfo(
+                name="EigenLayer Season 2+",
+                chain="ethereum", category="defi",
+                description="リステーキングプロトコル。TVL $15B+。EIGEN追加配布が期待される。",
+                url="https://eigenlayer.xyz", status="upcoming",
+                requirements=["ETHリステーキング", "AVS選択", "ガバナンス"],
+                source="curated", confidence=85,
+            ),
+            AirdropInfo(
+                name="EtherFi Season 3",
+                chain="ethereum", category="defi",
+                description="リキッドリステーキング。eETH保有・DeFi利用でポイント獲得。",
+                url="https://ether.fi", status="active",
+                requirements=["eETH保有", "DeFi利用", "ポイント獲得"],
+                source="curated", confidence=85,
+            ),
+            AirdropInfo(
+                name="Pendle Season 2+",
+                chain="ethereum", category="defi",
+                description="利回りトークン化。YT/PT取引・LP提供でvePENDLE報酬。",
+                url="https://pendle.finance", status="upcoming",
+                requirements=["YT/PT取引", "LP提供", "vePENDLE保有"],
+                source="curated", confidence=75,
+            ),
+            AirdropInfo(
+                name="Morpho",
+                chain="ethereum", category="defi",
+                description="レンディング最適化。$MORPHO配布進行中。利用量に応じた配布。",
+                url="https://morpho.org", status="active",
+                requirements=["レンディング利用", "Vault提供"],
+                source="curated", confidence=80,
+            ),
+            AirdropInfo(
+                name="Ethena (ENA) Season 3",
+                chain="ethereum", category="defi",
+                description="合成ドルUSDe。sUSDe保有・LP提供でSats獲得。",
+                url="https://ethena.fi", status="active",
+                requirements=["sUSDe保有", "LP提供", "Sats獲得"],
+                source="curated", confidence=80,
+            ),
+            AirdropInfo(
+                name="Symbiotic",
+                chain="ethereum", category="defi",
+                description="リステーキングプロトコル。EigenLayerの競合。トークン未発行。",
+                url="https://symbiotic.fi", status="speculative",
+                requirements=["リステーキング", "Vault利用"],
+                source="curated", confidence=75,
+            ),
+
+            # ─── L2 / 新興チェーン ───
+            AirdropInfo(
+                name="Berachain (BERA)",
+                chain="berachain", category="l2",
+                description="Proof of Liquidity。メインネットローンチ済み。BGT獲得でガバナンス参加。",
+                url="https://berachain.com", status="active",
+                requirements=["流動性提供", "BGT獲得", "ガバナンス"],
+                source="curated", confidence=90,
+            ),
+            AirdropInfo(
+                name="Monad",
+                chain="monad", category="l2",
+                description="超高速EVM L1。テストネット進行中。$225M調達。エアドロ期待大。",
+                url="https://monad.xyz", status="speculative",
+                requirements=["テストネット参加", "コミュニティ活動"],
+                source="curated", confidence=85,
+            ),
+            AirdropInfo(
+                name="MegaETH",
+                chain="megaeth", category="l2",
+                description="リアルタイムEVM L2。メインネットローンチ。$20M調達。",
+                url="https://megaeth.systems", status="active",
+                requirements=["テストネット参加", "ブリッジ利用"],
+                source="curated", confidence=80,
+            ),
+            AirdropInfo(
+                name="Abstract",
+                chain="ethereum", category="l2",
+                description="消費者向けL2。テストネット進行中。Pudgy Penguinsチーム。",
+                url="https://abs.xyz", status="active",
+                requirements=["テストネット参加", "NFT保有"],
+                source="curated", confidence=80,
+            ),
+            AirdropInfo(
+                name="Scroll Season 2",
+                chain="scroll", category="l2",
+                description="zkRollup L2。Session 2進行中。ブリッジ・DeFi利用でマーク獲得。",
+                url="https://scroll.io", status="active",
+                requirements=["ブリッジ利用", "DeFi利用", "マーク獲得"],
+                source="curated", confidence=75,
+            ),
+            AirdropInfo(
+                name="Linea Season 2",
+                chain="linea", category="l2",
+                description="Consensys L2。LXP-L獲得プログラム進行中。",
+                url="https://linea.build", status="active",
+                requirements=["ブリッジ利用", "DeFi利用", "LXP獲得"],
+                source="curated", confidence=70,
+            ),
+            AirdropInfo(
+                name="Fuel Network",
+                chain="ethereum", category="l2",
+                description="モジュラーL2。テストネット進行中。$80M調達。",
+                url="https://fuel.network", status="speculative",
+                requirements=["テストネット参加", "ブリッジ利用"],
+                source="curated", confidence=70,
+            ),
+
+            # ─── NFT / マーケットプレイス ───
+            AirdropInfo(
+                name="Magic Eden (ME) Season 3",
+                chain="multi", category="nft",
+                description="マルチチェーンNFTマーケットプレイス。ガバナンス参加・クエスト完了で対象。",
+                url="https://magiceden.io", status="active",
+                requirements=["MEウォレット", "ガバナンス参加", "クエスト完了"],
+                source="curated", confidence=90,
+            ),
+            AirdropInfo(
+                name="OpenSea",
+                chain="ethereum", category="nft",
+                description="最大NFTマーケットプレイス。SEAトークン発行の噂。過去利用者にRetrodrop期待。",
+                url="https://opensea.io", status="speculative",
+                requirements=["NFT取引履歴", "アクティブ利用"],
+                source="curated", confidence=70,
+            ),
+
+            # ─── GameFi ───
             AirdropInfo(
                 name="Star Atlas (ATLAS/POLIS)",
-                category="gamefi",
-                description="大型宇宙MMO。ゲーム内活動・NFT保有でシーズン報酬。Unreal Engine 5。",
-                url="https://staratlas.com",
-                status="upcoming",
+                chain="solana", category="gamefi",
+                description="大型宇宙MMO。ゲーム内活動・NFT保有でシーズン報酬。",
+                url="https://staratlas.com", status="upcoming",
                 requirements=["ゲームプレイ", "NFT保有", "DAO参加"],
-                source="curated",
-                confidence=65,
+                source="curated", confidence=65,
             ),
             AirdropInfo(
-                name="Aurory (AURY)",
-                category="gamefi",
-                description="ターンベースRPG。Seekers of Tokane。ゲーム内報酬・NFTエアドロ。",
-                url="https://aurory.io",
-                status="upcoming",
-                requirements=["ゲームプレイ", "NFT保有"],
-                source="curated",
-                confidence=55,
-            ),
-            AirdropInfo(
-                name="Genopets (GENE/KI)",
-                category="gamefi",
-                description="Move-to-Earn RPG。歩数でトークン獲得。新シーズン報酬。",
-                url="https://genopets.me",
-                status="upcoming",
-                requirements=["アプリ利用", "歩数記録", "ペット育成"],
-                source="curated",
-                confidence=50,
+                name="Pixels",
+                chain="ethereum", category="gamefi",
+                description="Web3農業ゲーム。Ronin Chain。$PIXEL追加配布期待。",
+                url="https://pixels.xyz", status="upcoming",
+                requirements=["ゲームプレイ", "土地NFT保有"],
+                source="curated", confidence=60,
             ),
             AirdropInfo(
                 name="Nyan Heroes",
-                category="gamefi",
-                description="猫×メカのバトルロイヤルFPS。Epic Games Store配信。トークンローンチ予定。",
-                url="https://nyanheroes.com",
-                status="speculative",
-                requirements=["ゲームプレイ", "NFT保有", "コミュニティ参加"],
-                source="curated",
-                confidence=60,
+                chain="solana", category="gamefi",
+                description="猫×メカのバトルロイヤルFPS。トークンローンチ予定。",
+                url="https://nyanheroes.com", status="speculative",
+                requirements=["ゲームプレイ", "NFT保有"],
+                source="curated", confidence=60,
             ),
             AirdropInfo(
-                name="SolPump",
-                category="gamefi",
-                description="Play & Earnゲーム。アクティブプレイヤーにエアドロ。Binance上場の噂。",
-                url="https://solpump.fun",
-                status="active",
-                requirements=["ゲームプレイ", "デイリータスク"],
-                source="curated",
-                confidence=55,
-            ),
-            AirdropInfo(
-                name="Photo Finish LIVE",
-                category="gamefi",
-                description="競馬シミュレーション。馬NFT保有・レース参加で報酬。",
-                url="https://photofinish.live",
-                status="upcoming",
-                requirements=["馬NFT保有", "レース参加"],
-                source="curated",
-                confidence=45,
-            ),
-            AirdropInfo(
-                name="DeFi Land",
-                category="gamefi",
-                description="農業シミュレーション × DeFi。ゲーム内でDeFi操作。シーズン報酬。",
-                url="https://defi.land",
-                status="upcoming",
-                requirements=["ゲームプレイ", "DeFi操作"],
-                source="curated",
-                confidence=45,
-            ),
-            AirdropInfo(
-                name="Honeyland",
-                category="gamefi",
-                description="養蜂シミュレーション。ハチNFT保有・ミッション完了で報酬。",
-                url="https://honey.land",
-                status="upcoming",
-                requirements=["NFT保有", "ミッション完了"],
-                source="curated",
-                confidence=40,
+                name="Parallel (PRIME)",
+                chain="ethereum", category="gamefi",
+                description="SF TCG。Echelon Prime。追加シーズン報酬期待。",
+                url="https://parallel.life", status="upcoming",
+                requirements=["ゲームプレイ", "カードNFT保有"],
+                source="curated", confidence=55,
             ),
 
-            # インフラ系
+            # ─── インフラ ───
             AirdropInfo(
-                name="Grass (GRASS)",
-                category="infra",
-                description="分散型AIデータネットワーク。帯域共有でポイント獲得。Season 2進行中。",
-                url="https://getgrass.io",
-                status="active",
+                name="Grass (GRASS) Season 2",
+                chain="solana", category="infra",
+                description="分散型AIデータネットワーク。帯域共有でポイント獲得。",
+                url="https://getgrass.io", status="active",
                 requirements=["ブラウザ拡張インストール", "帯域共有"],
-                source="curated",
-                confidence=75,
+                source="curated", confidence=75,
             ),
             AirdropInfo(
-                name="OpenLoop",
-                category="infra",
-                description="分散型帯域共有ネットワーク。ノード運用でポイント獲得。",
-                url="https://openloop.so",
-                status="active",
-                requirements=["ノード運用", "ポイント獲得"],
-                source="curated",
-                confidence=60,
+                name="LayerZero Season 2",
+                chain="multi", category="infra",
+                description="オムニチェーンプロトコル。ZRO追加配布期待。クロスチェーン利用で対象。",
+                url="https://layerzero.network", status="upcoming",
+                requirements=["クロスチェーン送金", "dApp利用"],
+                source="curated", confidence=70,
+            ),
+            AirdropInfo(
+                name="Wormhole (W) Season 2",
+                chain="multi", category="infra",
+                description="クロスチェーンブリッジ。W追加配布期待。ブリッジ利用で対象。",
+                url="https://wormhole.com", status="upcoming",
+                requirements=["ブリッジ利用", "マルチチェーン送金"],
+                source="curated", confidence=65,
             ),
         ]
 
         return curated
 
     # ============================================================
-    # ソース 7: Twitter/Nitter 監視
+    # ソース 9: Twitter/Nitter 監視
     # ============================================================
     async def _source_twitter(self) -> list[AirdropInfo]:
         """Nitter経由: プロトコル公式のエアドロ言及を検出"""
         airdrops = []
 
-        # DeFi + GameFi + NFT から主要なものを監視
-        protocols_to_check = (
-            self.DEFI_PROTOCOLS[:8]
-            + self.GAMEFI_PROTOCOLS[:6]
-            + self.NFT_PROTOCOLS[:3]
-            + self.INFRA_PROTOCOLS[:4]
-        )
-
-        for protocol in protocols_to_check:
+        for protocol in self.ALL_PROTOCOLS[:15]:
             for inst in self.NITTER_INSTANCES:
                 try:
-                    search_url = f"{inst}/search?q={protocol.replace(' ', '+')}+airdrop+solana"
+                    search_url = f"{inst}/search?q={protocol.replace(' ', '+')}+airdrop"
                     async with self.session.get(
                         search_url,
                         timeout=aiohttp.ClientTimeout(total=8),
@@ -734,6 +978,15 @@ class AirdropScanner:
                         for tweet in tweets[:3]:
                             text = tweet.get_text(strip=True).lower()
                             if any(kw in text for kw in self.AIRDROP_KEYWORDS):
+                                # チェーン判定
+                                chain = "multi"
+                                if protocol in [p.lower() for p in self.SOL_DEFI]:
+                                    chain = "solana"
+                                elif protocol in [p.lower() for p in self.ETH_DEFI]:
+                                    chain = "ethereum"
+                                elif protocol in [p.lower() for p in self.L2_CHAINS]:
+                                    chain = protocol
+
                                 # カテゴリ判定
                                 cat = "defi"
                                 if protocol in [p.lower() for p in self.GAMEFI_PROTOCOLS]:
@@ -743,6 +996,7 @@ class AirdropScanner:
 
                                 airdrops.append(AirdropInfo(
                                     name=f"{protocol.title()} Airdrop",
+                                    chain=chain,
                                     category=cat,
                                     description=tweet.get_text(strip=True)[:200],
                                     status="active",
@@ -750,7 +1004,7 @@ class AirdropScanner:
                                     confidence=55,
                                 ))
                                 break
-                    break  # 1つのNitterで成功したら次のプロトコルへ
+                    break
                 except Exception:
                     continue
 
@@ -759,8 +1013,65 @@ class AirdropScanner:
         return airdrops
 
     # ============================================================
+    # ソース 10: 取引所ニュース（Gate.io / MEXC エアドロ情報）
+    # ============================================================
+    async def _source_exchange_news(self) -> list[AirdropInfo]:
+        """取引所のエアドロ・ローンチプール情報を取得"""
+        airdrops = []
+
+        # Gate.io Startup / Launchpool
+        try:
+            url = "https://www.gate.io/api/v4/spot/currencies"
+            async with self.session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"Accept": "application/json"},
+            ) as resp:
+                if resp.status == 200:
+                    # Gate.ioのAPIが使えない場合はスキップ
+                    pass
+        except Exception:
+            pass
+
+        # Binance Launchpool（公開API）
+        try:
+            url = "https://www.binance.com/bapi/earn/v1/public/launchpool/project/list"
+            async with self.session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"Accept": "application/json"},
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    projects = data.get("data", [])
+                    if isinstance(projects, list):
+                        for proj in projects[:10]:
+                            name = proj.get("projectName", "") or proj.get("asset", "")
+                            if name:
+                                airdrops.append(AirdropInfo(
+                                    name=f"{name} (Binance Launchpool)",
+                                    chain="multi",
+                                    category="defi",
+                                    description="Binance Launchpoolで配布中/予定",
+                                    url="https://www.binance.com/en/launchpool",
+                                    status="active",
+                                    source="binance-launchpool",
+                                    confidence=85,
+                                ))
+        except Exception as e:
+            logger.debug(f"Exchange news error: {e}")
+
+        return airdrops
+
+    # ============================================================
     # ユーティリティ
     # ============================================================
+    def filter_by_chain(
+        self, airdrops: list[AirdropInfo], chain: str
+    ) -> list[AirdropInfo]:
+        """チェーンでフィルタ"""
+        return [a for a in airdrops if a.chain == chain or a.chain == "multi"]
+
     def filter_by_category(
         self, airdrops: list[AirdropInfo], category: str
     ) -> list[AirdropInfo]:
@@ -784,34 +1095,46 @@ class AirdropScanner:
         if not airdrops:
             return "エアドロップ情報なし"
 
-        # カテゴリ別に集計
-        by_cat = {}
+        # チェーン別 → カテゴリ別に集計
+        by_chain = {}
         for a in airdrops:
-            by_cat.setdefault(a.category or "other", []).append(a)
+            by_chain.setdefault(a.chain, []).append(a)
+
+        chain_emoji = {
+            "solana": "◎", "ethereum": "⟠", "arbitrum": "🔵",
+            "base": "🔷", "optimism": "🔴", "polygon": "💜",
+            "bsc": "🟡", "sui": "💧", "berachain": "🐻",
+            "monad": "🟣", "scroll": "📜", "linea": "🌐",
+            "blast": "💥", "multi": "🌍",
+        }
 
         cat_emoji = {
-            "defi": "💰",
-            "gamefi": "🎮",
-            "nft": "🖼️",
-            "infra": "🔧",
-            "social": "💬",
-            "other": "📦",
+            "defi": "💰", "gamefi": "🎮", "nft": "🖼️",
+            "infra": "🔧", "social": "💬", "l2": "⛓️", "other": "📦",
         }
 
         lines = [f"**✈️ エアドロップ情報 ({len(airdrops)}件)**\n"]
 
-        for cat, items in sorted(by_cat.items()):
-            emoji = cat_emoji.get(cat, "📦")
-            lines.append(f"\n{emoji} **{cat.upper()}** ({len(items)}件)")
-            for a in items[:5]:
-                conf_bar = "🟢" if a.confidence >= 70 else "🟡" if a.confidence >= 50 else "🔴"
-                lines.append(
-                    f"  {conf_bar} **{a.name}** [{a.status}] "
-                    f"(確度: {a.confidence}%)"
-                )
-                if a.description:
-                    lines.append(f"    {a.description[:80]}...")
-                if a.requirements:
-                    lines.append(f"    📋 {', '.join(a.requirements[:3])}")
+        for chain, items in sorted(by_chain.items()):
+            emoji = chain_emoji.get(chain, "🔗")
+            lines.append(f"\n{emoji} **{chain.upper()}** ({len(items)}件)")
+
+            # カテゴリ別にグループ化
+            by_cat = {}
+            for a in items:
+                by_cat.setdefault(a.category or "other", []).append(a)
+
+            for cat, cat_items in sorted(by_cat.items()):
+                ce = cat_emoji.get(cat, "📦")
+                for a in cat_items[:3]:
+                    conf_bar = "🟢" if a.confidence >= 70 else "🟡" if a.confidence >= 50 else "🔴"
+                    lines.append(
+                        f"  {conf_bar} {ce} **{a.name}** [{a.status}] "
+                        f"(確度: {a.confidence}%)"
+                    )
+                    if a.description:
+                        lines.append(f"    {a.description[:80]}...")
+                    if a.requirements:
+                        lines.append(f"    📋 {', '.join(a.requirements[:3])}")
 
         return "\n".join(lines)
