@@ -249,6 +249,87 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
+    # エアドロップ通知
+    # ================================================================
+    async def send_airdrop_report(self, airdrops: list, title: str = "✈️ エアドロップ情報"):
+        """エアドロップ情報を Discord Embed で通知"""
+        if not self.webhook_url or not airdrops:
+            return
+
+        # カテゴリ別に分類
+        by_cat = {}
+        for a in airdrops:
+            by_cat.setdefault(a.category or "other", []).append(a)
+
+        cat_emoji = {
+            "defi": "💰", "gamefi": "🎮", "nft": "🖼️",
+            "infra": "🔧", "social": "💬", "other": "📦",
+        }
+
+        # サマリー Embed
+        from datetime import datetime, timezone
+        summary = {
+            "title": title,
+            "description": (
+                f"**{len(airdrops)}件**のエアドロップ候補を検出\n"
+                f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                + "\n".join(
+                    f"{cat_emoji.get(c, '📦')} **{c.upper()}**: {len(items)}件"
+                    for c, items in sorted(by_cat.items())
+                )
+            ),
+            "color": self.COLOR_BLUE,
+            "footer": {"text": "Sol Screener v4 | Airdrop Scanner"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        embeds = [summary]
+
+        # 上位エアドロを個別 Embed で通知（確度順、最大9件）
+        for a in airdrops[:9]:
+            conf_bar = "🟢" if a.confidence >= 70 else "🟡" if a.confidence >= 50 else "🔴"
+            emoji = cat_emoji.get(a.category, "📦")
+
+            desc_lines = []
+            if a.description:
+                desc_lines.append(a.description[:200])
+            desc_lines.append("")
+            desc_lines.append(f"{conf_bar} 確度: **{a.confidence}%** | ステータス: `{a.status}`")
+            desc_lines.append(f"📂 カテゴリ: `{a.category}` | ソース: `{a.source}`")
+
+            if a.estimated_value:
+                desc_lines.append(f"💰 推定規模: `{a.estimated_value}`")
+
+            if a.requirements:
+                desc_lines.append(f"📋 参加条件: {', '.join(a.requirements[:4])}")
+
+            if a.url:
+                desc_lines.append(f"\n🔗 [プロジェクトサイト]({a.url})")
+
+            # 色: 確度に応じて
+            if a.confidence >= 75:
+                color = self.COLOR_GREEN
+            elif a.confidence >= 50:
+                color = self.COLOR_YELLOW
+            else:
+                color = 0x95A5A6  # グレー
+
+            embed = {
+                "title": f"{emoji} {a.name}",
+                "description": "\n".join(desc_lines),
+                "color": color,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            embeds.append(embed)
+
+        # Discord は 1 メッセージ 10 embeds まで → 分割送信
+        for i in range(0, len(embeds), 10):
+            chunk = embeds[i:i + 10]
+            await self._send_webhook({"embeds": chunk})
+            if i + 10 < len(embeds):
+                await asyncio.sleep(1)
+
+    # ================================================================
     # 日次レポート
     # ================================================================
     async def send_daily_report(self, report_text: str):

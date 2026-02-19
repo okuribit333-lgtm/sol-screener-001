@@ -1,5 +1,5 @@
 """
-Solana Auto Screener v4 — 完全統合版 main.py
+Solana Auto Screener v4.1 — 完全統合版 main.py
 Railway Worker モードで動作
 
 機能一覧:
@@ -14,8 +14,14 @@ Railway Worker モードで動作
      - スマートマネー分析
      - 多次元スコアリング
      - 期待値計算
-  3. 日次レポート（毎朝）
-  4. Discord Embed 通知（直リンク付き）
+  3. エアドロップスキャン（1日2回: 9時/21時 JST）
+     - DeFiLlama（DeFi + GameFi）
+     - CoinGecko（Solanaカテゴリ）
+     - Airdrops.io / AirdropAlert.com
+     - 手動キュレーション（主要プロジェクト）
+     - Twitter/Nitter 監視
+  4. 日次レポート（毎朝）
+  5. Discord Embed 通知（直リンク付き）
 """
 import asyncio
 import logging
@@ -60,6 +66,7 @@ from src.mania import ManiaScorer
 from src.expectation import ExpectationCalculator
 from src.monitors import WalletMonitor, LiquidityMonitor, SOLRangeMonitor
 from src.market_events import TGEMonitor, NFTFloorMonitor, MemeChartMonitor
+from src.airdrop import AirdropScanner
 
 
 # ============================================================
@@ -80,6 +87,7 @@ sol_range_monitor: SOLRangeMonitor = None  # type: ignore
 tge_monitor: TGEMonitor = None  # type: ignore
 nft_floor_monitor: NFTFloorMonitor = None  # type: ignore
 meme_monitor: MemeChartMonitor = None  # type: ignore
+airdrop_scanner: AirdropScanner = None  # type: ignore
 
 
 # ============================================================
@@ -91,6 +99,7 @@ async def init():
     global pumpfun_detector, mania_scorer, expectation_calc
     global wallet_monitor, liquidity_monitor, sol_range_monitor
     global tge_monitor, nft_floor_monitor, meme_monitor
+    global airdrop_scanner
 
     timeout = aiohttp.ClientTimeout(total=30)
     session = aiohttp.ClientSession(timeout=timeout)
@@ -109,8 +118,9 @@ async def init():
     tge_monitor = TGEMonitor(session)
     nft_floor_monitor = NFTFloorMonitor(session)
     meme_monitor = MemeChartMonitor(session)
+    airdrop_scanner = AirdropScanner(session)
 
-    logger.info("✅ 全モジュール初期化完了")
+    logger.info("✅ 全モジュール初期化完了（エアドロスキャナー含む）")
 
 
 # ============================================================
@@ -332,6 +342,56 @@ async def run_full_scan():
 
 
 # ============================================================
+# エアドロップスキャン（1日2回: 9時/21時 JST）
+# ============================================================
+async def run_airdrop_scan():
+    """エアドロップ情報を7ソースから収集してDiscordに通知"""
+    logger.info("✈️ エアドロップスキャン開始...")
+
+    try:
+        # 全ソースからスキャン
+        all_airdrops = await airdrop_scanner.scan_all()
+
+        if not all_airdrops:
+            logger.info("エアドロップ情報なし")
+            return
+
+        # 確度50%以上のみ通知
+        high_conf = airdrop_scanner.filter_by_confidence(all_airdrops, min_confidence=50)
+
+        if not high_conf:
+            logger.info(f"エアドロ検出 {len(all_airdrops)}件、確度50%以上: 0件 → 通知スキップ")
+            return
+
+        # 上位20件に絞る
+        top_airdrops = airdrop_scanner.get_top(high_conf, n=20)
+
+        logger.info(
+            f"✈️ エアドロ通知: {len(top_airdrops)}件 "
+            f"(全{len(all_airdrops)}件中、確度50%以上: {len(high_conf)}件)"
+        )
+
+        # Discord に通知
+        now_jst = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        await notifier.send_airdrop_report(
+            top_airdrops,
+            title=f"✈️ エアドロップ情報 ({now_jst})",
+        )
+
+        # カテゴリ別サマリーをログに出力
+        by_cat = {}
+        for a in top_airdrops:
+            by_cat.setdefault(a.category or "other", []).append(a)
+        for cat, items in sorted(by_cat.items()):
+            logger.info(f"  [{cat}] {len(items)}件: {', '.join(a.name for a in items[:3])}...")
+
+    except Exception as e:
+        logger.error(f"エアドロップスキャンエラー: {e}", exc_info=True)
+
+    logger.info("✈️ エアドロップスキャン完了")
+
+
+# ============================================================
 # 日次レポート
 # ============================================================
 async def run_daily_report():
@@ -392,7 +452,7 @@ async def run_daily_report():
 async def main():
     """エントリーポイント"""
     logger.info("=" * 60)
-    logger.info("🚀 Solana Auto Screener v4 起動")
+    logger.info("🚀 Solana Auto Screener v4.1 起動")
     logger.info("=" * 60)
 
     # 設定確認
@@ -402,6 +462,7 @@ async def main():
     logger.info(f"  リアルタイム間隔: {config.realtime_interval}分")
     logger.info(f"  スキャン間隔: {config.scan_interval_minutes}分")
     logger.info(f"  日次レポート: {config.daily_report_hour}時")
+    logger.info(f"  エアドロスキャン: 9時/21時 JST")
     logger.info(f"  Pump.fun検知: {'ON' if config.enable_pumpfun else 'OFF'}")
     logger.info(f"  スマートマネー: {'ON' if config.enable_smart_money else 'OFF'}")
 
@@ -410,13 +471,14 @@ async def main():
     # 起動通知
     try:
         await notifier.send_text(
-            "**Solana Auto Screener v4** が起動しました\n\n"
+            "**Solana Auto Screener v4.1** が起動しました\n\n"
             f"⚡ リアルタイム: {config.realtime_interval}分間隔\n"
             f"🔍 フルスキャン: {config.scan_interval_minutes}分間隔\n"
+            f"✈️ エアドロスキャン: 9時/21時 JST\n"
             f"🎓 Pump.fun検知: {'ON' if config.enable_pumpfun else 'OFF'}\n"
             f"🧠 スマートマネー: {'ON' if config.enable_smart_money else 'OFF'}\n"
             f"🛡️ 危険自動除外: {'ON' if config.danger_auto_exclude else 'OFF'}",
-            title="🚀 Bot 起動",
+            title="🚀 Bot 起動 v4.1",
         )
     except Exception as e:
         logger.warning(f"起動通知エラー: {e}")
@@ -444,6 +506,16 @@ async def main():
         misfire_grace_time=120,
     )
 
+    # エアドロップスキャン（1日2回: 9時と21時 JST）
+    scheduler.add_job(
+        run_airdrop_scan,
+        CronTrigger(hour="9,21", minute=0),
+        id="airdrop_scan",
+        name="エアドロップスキャン",
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
     # 日次レポート
     scheduler.add_job(
         run_daily_report,
@@ -460,6 +532,10 @@ async def main():
     logger.info("🔄 初回スキャン実行中...")
     await run_realtime_monitor()
     await run_full_scan()
+
+    # 初回エアドロスキャンも実行
+    logger.info("🔄 初回エアドロスキャン実行中...")
+    await run_airdrop_scan()
 
     # 永続ループ
     try:
