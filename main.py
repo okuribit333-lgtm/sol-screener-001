@@ -63,6 +63,8 @@ from src.monitors import (
     WalletMonitor,
     LiquidityMonitor,
     SOLRangeMonitor,
+)
+from src.market_events import (
     TGEMonitor,
     NFTFloorMonitor,
     MemeChartMonitor,
