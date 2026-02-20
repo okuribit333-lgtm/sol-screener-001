@@ -389,7 +389,7 @@ async def run_airdrop_scan():
         fresh = []
         for a in high_conf:
             airdrop_key = f"airdrop_{a.name.lower().replace(' ', '_')}"
-            if not state_mgr.is_notified(airdrop_key):
+            if not state.is_notified(airdrop_key):
                 fresh.append(a)
         
         if not fresh:
@@ -408,7 +408,7 @@ async def run_airdrop_scan():
         # 通知済みとして記録
         for a in top_airdrops:
             airdrop_key = f"airdrop_{a.name.lower().replace(' ', '_')}"
-            state_mgr.mark_notified(airdrop_key)
+            state.mark_notified(airdrop_key)
 
         logger.info(
             f"✈️ エアドロ通知: {len(top_airdrops)}件 "
