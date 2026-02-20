@@ -1,5 +1,5 @@
 """
-Solana Auto Screener v5.2 — 完全統合版 main.py
+Solana Auto Screener v5.3 — 完全統合版 main.py
 Railway Worker モードで動作
 
 ■ 通知種別（Discordで色分け表示）:
@@ -367,7 +367,7 @@ async def run_full_scan():
 # エアドロップスキャン（1日2回: 9時/21時 JST）
 # ============================================================
 async def run_airdrop_scan():
-    """エアドロップ情報を複数ソースから収集してDiscordに通知"""
+    """エアドロップ情報を複数ソースから収集してDiscordに通知（重複排除・BCG枠確保）"""
     logger.info("✈️ エアドロップスキャン開始...")
 
     try:
@@ -378,19 +378,42 @@ async def run_airdrop_scan():
             logger.info("エアドロップ情報なし")
             return
 
-        # 確度50%以上のみ通知
-        high_conf = airdrop_scanner.filter_by_confidence(all_airdrops, min_confidence=50)
+        # 確度40%以上（広めに拾う — 精査はユーザー側）
+        high_conf = airdrop_scanner.filter_by_confidence(all_airdrops, min_confidence=40)
 
         if not high_conf:
-            logger.info(f"エアドロ検出 {len(all_airdrops)}件、確度50%以上: 0件 → 通知スキップ")
+            logger.info(f"エアドロ検出 {len(all_airdrops)}件、確度40%以上: 0件 → 通知スキップ")
             return
 
-        # 上位20件に絞る
-        top_airdrops = airdrop_scanner.get_top(high_conf, n=20)
+        # 前回通知済みを除外（24時間以内に通知したものはスキップ）
+        fresh = []
+        for a in high_conf:
+            airdrop_key = f"airdrop_{a.name.lower().replace(' ', '_')}"
+            if not state_mgr.is_notified(airdrop_key):
+                fresh.append(a)
+        
+        if not fresh:
+            logger.info(f"エアドロ {len(high_conf)}件全て通知済み → 新規なし、スキップ")
+            return
+
+        # BCG/ゲーム枠を確保（最低5枠）
+        gamefi = [a for a in fresh if a.category in ('gamefi', 'bcg', 'gaming', 'nft')]
+        others = [a for a in fresh if a.category not in ('gamefi', 'bcg', 'gaming', 'nft')]
+        
+        # ゲーム枠5 + その他15 = 合計20件（足りなければ埋め合わせ）
+        game_top = airdrop_scanner.get_top(gamefi, n=5) if gamefi else []
+        other_top = airdrop_scanner.get_top(others, n=20 - len(game_top))
+        top_airdrops = game_top + other_top
+
+        # 通知済みとして記録
+        for a in top_airdrops:
+            airdrop_key = f"airdrop_{a.name.lower().replace(' ', '_')}"
+            state_mgr.mark_notified(airdrop_key)
 
         logger.info(
             f"✈️ エアドロ通知: {len(top_airdrops)}件 "
-            f"(全{len(all_airdrops)}件中、確度50%以上: {len(high_conf)}件)"
+            f"(全{len(all_airdrops)}件 → 確度40%+: {len(high_conf)}件 → 新規: {len(fresh)}件 → "
+            f"BCG枠: {len(game_top)}件 + 他: {len(other_top)}件)"
         )
 
         # Discord に通知
@@ -474,7 +497,7 @@ async def run_daily_report():
 async def main():
     """エントリーポイント"""
     logger.info("=" * 60)
-    logger.info("🚀 Solana Auto Screener v5.2 起動")
+    logger.info("🚀 Solana Auto Screener v5.3 起動")
     logger.info("=" * 60)
 
     # 設定確認
@@ -493,7 +516,7 @@ async def main():
     # 起動通知
     try:
         await notifier.send_text(
-            "**Solana Auto Screener v5.2** が起動しました\n\n"
+            "**Solana Auto Screener v5.3** が起動しました\n\n"
             f"⚡ リアルタイム: {config.realtime_interval}分間隔\n"
             f"🔍 フルスキャン: {config.scan_interval_minutes}分間隔\n"
             f"✈️ エアドロスキャン: 9時/21時 JST\n"
