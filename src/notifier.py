@@ -1,5 +1,12 @@
 """
-通知モジュール v5.4 — Discord Embed UX 全面改善版
+通知モジュール v5.6 — アクションリンク + 優先度タグ版
+
+■ v5.6 改善点:
+  - Jupiter スワップ直リンク（Phantom deeplink対応）
+  - DexScreener / BirdEye / Solscan / RugCheck 直リンク
+  - 優先度タグ: 🔴緊急 / 🟡通常 / 🟢情報
+  - 全通知にアクションリンクセクション統一
+  - スコア基準をv5.5に更新
 
 ■ 色分けルール（Embed左のバー色）:
   🟢 緑 (0x00FF88) = スコア70以上 / 安全 / 高確度エアドロ
@@ -11,13 +18,6 @@
   ⚪ グレー (0x95A5A6) = 低確度エアドロ
   🔥 オレンジ (0xFF6B35) = Meme急騰
   🚀 シアン (0x00D4AA) = TGE新規ローンチ
-
-■ v5.4 改善点:
-  - send_tge_alert(): TGE検知をEmbed形式で通知（テキスト→Embed）
-  - send_meme_alert(): Meme急騰をEmbed形式で通知（テキスト→Embed）
-  - _fmt_usd(): $0表示をN/Aに、K/M単位で見やすく
-  - スコア基準・フィルタ基準をfooterに表示
-  - 全通知にバージョン番号統一 (v5.4)
 """
 import asyncio
 import logging
@@ -30,6 +30,7 @@ from .config import config
 from .scanner import SolanaProject
 
 logger = logging.getLogger(__name__)
+
 
 # ── リンク生成ヘルパー ──
 def _dexscreener_url(token_address: str) -> str:
@@ -47,9 +48,26 @@ def _solscan_url(token_address: str) -> str:
 def _photon_url(token_address: str) -> str:
     return f"https://photon-sol.tinyastro.io/en/lp/{token_address}"
 
+def _jupiter_swap_url(token_address: str) -> str:
+    """Jupiter スワップ直リンク（Phantom内ブラウザで開くとそのまま取引可能）"""
+    return f"https://jup.ag/swap/SOL-{token_address}"
+
+def _raydium_swap_url(token_address: str) -> str:
+    return f"https://raydium.io/swap/?outputMint={token_address}"
+
+
+def _action_links(token_address: str) -> str:
+    """全通知共通のアクションリンクセクション"""
+    return (
+        f"⚡ [**Jupiter**]({_jupiter_swap_url(token_address)}) | "
+        f"[DexScreener]({_dexscreener_url(token_address)}) | "
+        f"[BirdEye]({_birdeye_url(token_address)}) | "
+        f"[Solscan]({_solscan_url(token_address)}) | "
+        f"[RugCheck]({_rugcheck_url(token_address)})"
+    )
+
 
 def _rank_label(score: float) -> str:
-    """スコアからランクラベルを生成"""
     if score >= 80:
         return "S"
     elif score >= 60:
@@ -62,14 +80,12 @@ def _rank_label(score: float) -> str:
 
 
 def _score_bar(score: float) -> str:
-    """スコアをビジュアルバーで表現"""
     filled = int(score / 10)
     empty = 10 - filled
     return "█" * filled + "░" * empty
 
 
 def _fmt_usd(value: float) -> str:
-    """USD金額をフォーマット（0の場合はN/A）"""
     if value <= 0:
         return "N/A"
     if value >= 1_000_000:
@@ -79,30 +95,34 @@ def _fmt_usd(value: float) -> str:
     return f"${value:,.0f}"
 
 
-VERSION = "v5.4"
+# ── 優先度タグ ──
+PRIORITY_URGENT = "🔴 緊急"    # TGE初動/NFTミント/大口移動/卒業
+PRIORITY_NORMAL = "🟡 通常"    # 定期スキャン/エアドロ
+PRIORITY_INFO   = "🟢 情報"    # 日次レポート/ステータス
+
+VERSION = "v5.6"
 FOOTER_BASE = f"Sol Screener {VERSION}"
 
 
 class Notifier:
-    """Discord Webhook 通知（Embed 形式・UX改善版）"""
+    """Discord Webhook 通知（Embed + アクションリンク + 優先度タグ）"""
 
-    # Embed カラー定義
-    COLOR_GREEN  = 0x00FF88   # 安全 / 高スコア (70+)
-    COLOR_YELLOW = 0xFFCC00   # 注意 / 中スコア (40-69)
-    COLOR_RED    = 0xFF3333   # 危険 / ラグプル
-    COLOR_BLUE   = 0x5865F2   # 情報 / レポート
-    COLOR_PURPLE = 0x9B59B6   # Pump.fun 卒業
-    COLOR_GOLD   = 0xF1C40F   # スマートマネー
-    COLOR_GREY   = 0x95A5A6   # 低確度
-    COLOR_ORANGE = 0xFF6B35   # Meme急騰
-    COLOR_CYAN   = 0x00D4AA   # TGE新規ローンチ
+    COLOR_GREEN  = 0x00FF88
+    COLOR_YELLOW = 0xFFCC00
+    COLOR_RED    = 0xFF3333
+    COLOR_BLUE   = 0x5865F2
+    COLOR_PURPLE = 0x9B59B6
+    COLOR_GOLD   = 0xF1C40F
+    COLOR_GREY   = 0x95A5A6
+    COLOR_ORANGE = 0xFF6B35
+    COLOR_CYAN   = 0x00D4AA
 
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
         self.webhook_url = config.discord_webhook_url
 
     # ================================================================
-    # 1. フルスキャン結果通知
+    # 1. フルスキャン結果通知 [🟡通常]
     # ================================================================
     async def send_scan_results(
         self,
@@ -111,7 +131,6 @@ class Notifier:
         smart_money_results: Optional[dict] = None,
         title: str = "🔍 定期スキャン結果",
     ):
-        """フルスキャン結果を Discord Embed で通知"""
         if not self.webhook_url:
             logger.warning("DISCORD_WEBHOOK_URL が未設定")
             return
@@ -121,24 +140,24 @@ class Notifier:
             return
 
         legend_embed = {
-            "title": title,
+            "title": f"{PRIORITY_NORMAL} {title}",
             "description": (
                 f"**{len(projects)}件**のトークンを検出\n"
                 f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                "**■ 色分けルール:**\n"
-                "🟢 緑 = スコア70+ (S/Aランク)\n"
-                "🟡 黄 = スコア40-69 (Bランク)\n"
-                "🔴 赤 = スコア40未満 (C/Dランク)\n"
-                "🟣 紫 = Pump.fun卒業トークン\n\n"
-                "**■ スコア基準:**\n"
-                "流動性(15%) + 出来高(15%) + 価格変動(10%) + TX数(10%) + "
-                "ソーシャル(35%) + 開発(10%) + 安全性ボーナス + 卒業ボーナス + SM\n\n"
-                "**■ フィルタ基準:**\n"
-                f"最低流動性: ${config.min_liquidity_usd:,.0f} | "
-                f"最低出来高: ${config.min_volume_24h_usd:,.0f}"
+                "**■ ランク:**\n"
+                "🟢 S/A (70+) | 🟡 B (40-69) | 🔴 C/D (<40) | 🟣 卒業\n\n"
+                "**■ スコア基準 (v5.5):**\n"
+                "流動性22% + 出来高22% + 価格変動15% + TX数15%\n"
+                "+ Makers10% + Web6% + Twitter5% + 監査3% + 年齢2%\n\n"
+                "**■ フィルタ:**\n"
+                f"MC≥${config.min_mcap_usd/1000:.0f}K | "
+                f"Liq≥${config.min_liquidity_usd/1000:.0f}K | "
+                f"Vol≥${config.min_volume_24h_usd/1000:.0f}K | "
+                f"TX≥{config.min_tx_count_24h} | "
+                f"Makers≥{config.min_makers_24h}"
             ),
             "color": self.COLOR_BLUE,
-            "footer": {"text": f"{FOOTER_BASE} | DexScreener + RugCheck + BirdEye"},
+            "footer": {"text": f"{FOOTER_BASE} | ⚡Jupiter = Phantomで即スワップ"},
         }
 
         embeds = [legend_embed]
@@ -156,26 +175,19 @@ class Notifier:
                 await asyncio.sleep(1)
 
     # ================================================================
-    # 2. Pump.fun 卒業通知（紫色）
+    # 2. Pump.fun 卒業通知 [🔴緊急]
     # ================================================================
     async def send_graduation_alert(
         self,
         project: SolanaProject,
         safety: Optional[dict] = None,
     ):
-        """Pump.fun → Raydium 卒業をリアルタイム通知"""
         if not self.webhook_url:
             return
 
         addr = project.token_address
         risk_emoji = self._risk_emoji(safety)
-
-        links = (
-            f"[DexScreener]({_dexscreener_url(addr)}) | "
-            f"[RugCheck]({_rugcheck_url(addr)}) | "
-            f"[BirdEye]({_birdeye_url(addr)}) | "
-            f"[Solscan]({_solscan_url(addr)})"
-        )
+        links = _action_links(addr)
 
         desc_lines = [
             f"**{project.name}** (`{project.symbol}`) が Raydium に上場しました！",
@@ -195,7 +207,7 @@ class Notifier:
         desc_lines.append(f"🔗 {links}")
 
         embed = {
-            "title": f"🎓 Pump.fun 卒業: {project.symbol}",
+            "title": f"{PRIORITY_URGENT} 🎓 Pump.fun 卒業: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_PURPLE,
             "thumbnail": {"url": f"https://dd.dexscreener.com/ds-data/tokens/solana/{addr}.png"},
@@ -212,14 +224,13 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 3. 危険トークン警告（赤色）
+    # 3. 危険トークン警告 [🔴緊急]
     # ================================================================
     async def send_danger_alert(
         self,
         project: SolanaProject,
         safety: dict,
     ):
-        """危険トークンの警告通知"""
         if not self.webhook_url:
             return
 
@@ -236,12 +247,12 @@ class Notifier:
 
         desc_lines.append("")
         desc_lines.append(
-            f"🔗 [RugCheck で確認]({_rugcheck_url(addr)}) | "
+            f"🔗 [RugCheck]({_rugcheck_url(addr)}) | "
             f"[DexScreener]({_dexscreener_url(addr)})"
         )
 
         embed = {
-            "title": f"⚠️ 危険トークン: {project.symbol}",
+            "title": f"{PRIORITY_URGENT} ⚠️ 危険トークン: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_RED,
             "footer": {"text": f"{FOOTER_BASE} | このトークンは自動除外されました"},
@@ -251,14 +262,13 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 4. スマートマネー通知（金色）
+    # 4. スマートマネー通知 [🔴緊急]
     # ================================================================
     async def send_smart_money_alert(
         self,
         project: SolanaProject,
         smart_money: dict,
     ):
-        """スマートマネーの動きを通知"""
         if not self.webhook_url:
             return
 
@@ -283,14 +293,10 @@ class Notifier:
                 desc_lines.append(f"  • `{label}` (PnL: ${pnl:,.0f})")
 
         desc_lines.append("")
-        desc_lines.append(
-            f"🔗 [DexScreener]({_dexscreener_url(addr)}) | "
-            f"[BirdEye]({_birdeye_url(addr)}) | "
-            f"[RugCheck]({_rugcheck_url(addr)})"
-        )
+        desc_lines.append(f"🔗 {_action_links(addr)}")
 
         embed = {
-            "title": f"🧠 Smart Money 検知: {project.symbol}",
+            "title": f"{PRIORITY_URGENT} 🧠 Smart Money 検知: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_GOLD,
             "footer": {"text": f"{FOOTER_BASE} | Smart Money Tracker"},
@@ -300,20 +306,13 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 5. TGE（新規ローンチ）通知 — Embed形式 ★NEW v5.4
+    # 5. TGE（新規ローンチ）通知 [🔴緊急]
     # ================================================================
     async def send_tge_alert(self, event):
-        """TGE（Token Generation Event）をリッチEmbed形式で通知"""
         if not self.webhook_url:
             return
 
         addr = event.token_address
-        links = (
-            f"[DexScreener]({_dexscreener_url(addr)}) | "
-            f"[RugCheck]({_rugcheck_url(addr)}) | "
-            f"[BirdEye]({_birdeye_url(addr)})"
-        )
-
         display_name = event.name or "New Token"
         display_symbol = event.symbol or addr[:8] + "..."
 
@@ -322,35 +321,16 @@ class Notifier:
             "",
         ]
 
-        fields = []
-        fields.append({
-            "name": "📊 時価総額",
-            "value": f"`{_fmt_usd(event.initial_mcap)}`",
-            "inline": True,
-        })
-        fields.append({
-            "name": "💧 流動性",
-            "value": f"`{_fmt_usd(event.initial_liquidity)}`",
-            "inline": True,
-        })
-        fields.append({
-            "name": "🏷️ プラットフォーム",
-            "value": f"`{event.platform or 'unknown'}`",
-            "inline": True,
-        })
-        fields.append({
-            "name": "📡 ソース",
-            "value": f"`{event.source or 'dexscreener'}`",
-            "inline": True,
-        })
-        fields.append({
-            "name": "🔗 リンク",
-            "value": links,
-            "inline": False,
-        })
+        fields = [
+            {"name": "📊 時価総額", "value": f"`{_fmt_usd(event.initial_mcap)}`", "inline": True},
+            {"name": "💧 流動性", "value": f"`{_fmt_usd(event.initial_liquidity)}`", "inline": True},
+            {"name": "🏷️ プラットフォーム", "value": f"`{event.platform or 'unknown'}`", "inline": True},
+            {"name": "📡 ソース", "value": f"`{event.source or 'dexscreener'}`", "inline": True},
+            {"name": "🔗 アクション", "value": _action_links(addr), "inline": False},
+        ]
 
         embed = {
-            "title": f"🚀 新規ローンチ: {display_symbol}",
+            "title": f"{PRIORITY_URGENT} 🚀 新規ローンチ: {display_symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_CYAN,
             "fields": fields,
@@ -368,19 +348,13 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 6. Meme急騰通知 — Embed形式 ★NEW v5.4
+    # 6. Meme急騰通知 [🔴緊急]
     # ================================================================
     async def send_meme_alert(self, alert):
-        """Meme急騰をリッチEmbed形式で通知"""
         if not self.webhook_url:
             return
 
         addr = alert.token_address
-        links = (
-            f"[DexScreener]({_dexscreener_url(addr)}) | "
-            f"[RugCheck]({_rugcheck_url(addr)}) | "
-            f"[BirdEye]({_birdeye_url(addr)})"
-        )
 
         type_labels = {
             "5m_pump": "⚡ 5分急騰",
@@ -395,21 +369,18 @@ class Notifier:
             "",
         ]
 
-        fields = []
-        fields.append({
-            "name": "📈 価格変動",
-            "value": (
-                f"5m: `{alert.price_change_5m:+.1f}%`\n"
-                f"1h: `{alert.price_change_1h:+.1f}%`\n"
-                f"24h: `{alert.price_change_24h:+.1f}%`"
-            ),
-            "inline": True,
-        })
-        fields.append({
-            "name": "💧 流動性",
-            "value": f"`{_fmt_usd(alert.liquidity_usd)}`",
-            "inline": True,
-        })
+        fields = [
+            {
+                "name": "📈 価格変動",
+                "value": (
+                    f"5m: `{alert.price_change_5m:+.1f}%`\n"
+                    f"1h: `{alert.price_change_1h:+.1f}%`\n"
+                    f"24h: `{alert.price_change_24h:+.1f}%`"
+                ),
+                "inline": True,
+            },
+            {"name": "💧 流動性", "value": f"`{_fmt_usd(alert.liquidity_usd)}`", "inline": True},
+        ]
 
         if alert.volume_surge > 0:
             fields.append({
@@ -418,11 +389,7 @@ class Notifier:
                 "inline": True,
             })
 
-        fields.append({
-            "name": "🔗 リンク",
-            "value": links,
-            "inline": False,
-        })
+        fields.append({"name": "🔗 アクション", "value": _action_links(addr), "inline": False})
 
         if alert.price_change_5m >= 50 or alert.price_change_1h >= 100:
             color = self.COLOR_RED
@@ -432,7 +399,7 @@ class Notifier:
             color = self.COLOR_YELLOW
 
         embed = {
-            "title": f"🔥 Meme急騰: {alert.symbol} ({alert_label})",
+            "title": f"{PRIORITY_URGENT} 🔥 Meme急騰: {alert.symbol} ({alert_label})",
             "description": "\n".join(desc_lines),
             "color": color,
             "fields": fields,
@@ -451,10 +418,50 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 7. エアドロップ通知（マルチチェーン対応）
+    # 7. X（Twitter）ツイート通知 [🔴緊急] ★NEW v5.6
+    # ================================================================
+    async def send_tweet_alert(self, tweet_data: dict):
+        """Xアカウントの新規ツイートをDiscordに通知"""
+        if not self.webhook_url:
+            return
+
+        username = tweet_data.get("username", "unknown")
+        display_name = tweet_data.get("display_name", username)
+        text = tweet_data.get("text", "")
+        tweet_url = tweet_data.get("url", "")
+        likes = tweet_data.get("likes", 0)
+        retweets = tweet_data.get("retweets", 0)
+        replies = tweet_data.get("replies", 0)
+        profile_image = tweet_data.get("profile_image", "")
+
+        desc_lines = [
+            text[:500],
+            "",
+            f"❤️ `{likes:,}` | 🔁 `{retweets:,}` | 💬 `{replies:,}`",
+        ]
+
+        if tweet_url:
+            desc_lines.append(f"\n🔗 [ツイートを見る]({tweet_url})")
+
+        embed = {
+            "title": f"{PRIORITY_URGENT} 🐦 @{username}",
+            "description": "\n".join(desc_lines),
+            "color": self.COLOR_CYAN,
+            "author": {
+                "name": f"{display_name} (@{username})",
+                "url": f"https://x.com/{username}",
+                "icon_url": profile_image,
+            },
+            "footer": {"text": f"{FOOTER_BASE} | X Monitor"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        await self._send_webhook({"embeds": [embed]})
+
+    # ================================================================
+    # 8. エアドロップ通知 [🟡通常]
     # ================================================================
     async def send_airdrop_report(self, airdrops: list, title: str = "✈️ エアドロップ情報"):
-        """エアドロップ情報を Discord Embed で通知（マルチチェーン対応）"""
         if not self.webhook_url or not airdrops:
             return
 
@@ -486,17 +493,11 @@ class Notifier:
         ]
 
         summary = {
-            "title": title,
+            "title": f"{PRIORITY_NORMAL} {title}",
             "description": (
                 f"**{len(airdrops)}件**のエアドロップ候補\n"
                 f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                "**■ 色分けルール:**\n"
-                "🟢 緑 = 確度75%+ (高確度)\n"
-                "🟡 黄 = 確度50-74% (中確度)\n"
-                "⚪ グレー = 確度50%未満\n\n"
-                "**■ 確度の基準:**\n"
-                "キュレーション済み(+20) + TVL規模(+30) + トークン未発行(+20) + "
-                "VC支援(+10) + コミュニティ規模(+10) + 期間限定(+10)\n\n"
+                "**■ 確度:** 🟢75%+ | 🟡50-74% | ⚪<50%\n\n"
                 f"**チェーン別:**\n" + "\n".join(chain_lines) + "\n\n"
                 f"**カテゴリ別:**\n" + "\n".join(cat_lines)
             ),
@@ -523,10 +524,8 @@ class Notifier:
 
             if a.estimated_value:
                 desc_lines.append(f"💰 推定規模: `{a.estimated_value}`")
-
             if a.requirements:
                 desc_lines.append(f"📋 参加条件: {', '.join(a.requirements[:4])}")
-
             if a.url:
                 desc_lines.append(f"\n🔗 [プロジェクトサイト]({a.url})")
 
@@ -552,12 +551,11 @@ class Notifier:
                 await asyncio.sleep(1)
 
     # ================================================================
-    # 8. 日次レポート（青色）
+    # 9. 日次レポート [🟢情報]
     # ================================================================
     async def send_daily_report(self, report_text: str):
-        """日次レポートを送信"""
         embed = {
-            "title": "📊 日次レポート",
+            "title": f"{PRIORITY_INFO} 📊 日次レポート",
             "description": report_text[:4000],
             "color": self.COLOR_BLUE,
             "footer": {"text": f"{FOOTER_BASE} | Daily Report"},
@@ -566,12 +564,11 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 9. 汎用テキスト通知（青色）
+    # 10. 汎用テキスト通知 [🟢情報]
     # ================================================================
     async def send_text(self, text: str, title: str = "ℹ️ 通知"):
-        """シンプルなテキスト通知"""
         embed = {
-            "title": title,
+            "title": f"{PRIORITY_INFO} {title}",
             "description": text[:4000],
             "color": self.COLOR_BLUE,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -587,36 +584,16 @@ class Notifier:
         safety: dict,
         smart_money: dict,
     ) -> dict:
-        """プロジェクト用 Embed を構築"""
         addr = project.token_address
         risk_emoji = self._risk_emoji(safety)
         grad_badge = " 🎓卒業" if project.is_graduated else ""
         rank = _rank_label(project.total_score)
         bar = _score_bar(project.total_score)
 
-        links = (
-            f"[DexScreener]({_dexscreener_url(addr)}) | "
-            f"[RugCheck]({_rugcheck_url(addr)}) | "
-            f"[BirdEye]({_birdeye_url(addr)}) | "
-            f"[Solscan]({_solscan_url(addr)})"
-        )
-
         fields = [
-            {
-                "name": "💰 価格",
-                "value": f"`${project.price_usd:.8f}`",
-                "inline": True,
-            },
-            {
-                "name": "💧 流動性",
-                "value": f"`{_fmt_usd(project.liquidity_usd)}`",
-                "inline": True,
-            },
-            {
-                "name": "📊 時価総額",
-                "value": f"`{_fmt_usd(project.market_cap)}`",
-                "inline": True,
-            },
+            {"name": "💰 価格", "value": f"`${project.price_usd:.8f}`", "inline": True},
+            {"name": "💧 流動性", "value": f"`{_fmt_usd(project.liquidity_usd)}`", "inline": True},
+            {"name": "📊 時価総額", "value": f"`{_fmt_usd(project.market_cap)}`", "inline": True},
             {
                 "name": "📈 変動率",
                 "value": (
@@ -628,11 +605,16 @@ class Notifier:
             },
             {
                 "name": "🔄 24h取引",
-                "value": f"Vol: `{_fmt_usd(project.volume_24h_usd)}`\nTx: `{project.tx_count_24h:,}`",
+                "value": (
+                    f"Vol: `{_fmt_usd(project.volume_24h_usd)}`\n"
+                    f"Tx: `{project.tx_count_24h:,}`\n"
+                    f"Makers: `{project.makers_24h:,}`"
+                ),
                 "inline": True,
             },
         ]
 
+        # 安全性フィールド
         safety_lines = []
         if safety:
             if safety.get("rugcheck_score") is not None:
@@ -657,6 +639,7 @@ class Notifier:
                 "inline": True,
             })
 
+        # スマートマネーフィールド
         if smart_money and smart_money.get("smart_money_score", 0) > 0:
             sm_score = smart_money["smart_money_score"]
             whale_count = smart_money.get("whale_count", 0)
@@ -666,9 +649,10 @@ class Notifier:
                 "inline": True,
             })
 
+        # アクションリンク（Jupiter含む）
         fields.append({
-            "name": "🔗 リンク",
-            "value": links,
+            "name": "🔗 アクション",
+            "value": _action_links(addr),
             "inline": False,
         })
 
@@ -702,7 +686,6 @@ class Notifier:
         return embed
 
     def _append_safety_lines(self, lines: list, safety: dict):
-        """安全性情報をdesc_linesに追加"""
         warnings = safety.get("warnings", [])
         if warnings:
             for w in warnings[:5]:
@@ -731,7 +714,6 @@ class Notifier:
         return {"safe": "✅", "warning": "⚠️", "danger": "🔴"}.get(level, "❓")
 
     async def _send_webhook(self, payload: dict):
-        """Discord Webhook に送信"""
         if not self.webhook_url:
             return
         try:
@@ -749,7 +731,6 @@ class Notifier:
             logger.error(f"Discord 送信エラー: {e}")
 
     async def _send_simple(self, text: str):
-        """シンプルなテキストメッセージ"""
         if not self.webhook_url:
             return
         await self._send_webhook({"content": text[:2000]})
