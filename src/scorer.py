@@ -1,11 +1,16 @@
 """
-スコアラー v4 — 多次元スコアリング
-マーケット指標 + ソーシャル + 安全性 + Pump.fun卒業ボーナス + スマートマネー
+スコアラー v5.5 — 実データ重視の多次元スコアリング
 
-スコアは 0-100 で正規化
+v5.5 変更点:
+  - ソーシャル未取得分（45%）を実データ指標に再配分
+  - makers（ユニークトレーダー数）を新規追加
+  - twitter_exists（Xアカウント有無）を新規追加
+  - age_bonus（ペア作成からの経過時間）を新規追加
+  - スコアは 0-100 で正規化
 """
 import math
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from .config import config
@@ -15,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class Scorer:
-    """多次元スコアリングエンジン"""
+    """多次元スコアリングエンジン v5.5"""
 
     def __init__(self):
         self.weights = config.weights
@@ -33,21 +38,21 @@ class Scorer:
         """
         scores: dict[str, float] = {}
 
-        # ── マーケット指標 ──
-        scores["liquidity"] = self._log_score(project.liquidity_usd, 1000, 5_000_000)
-        scores["volume"] = self._log_score(project.volume_24h_usd, 500, 10_000_000)
+        # ── マーケット指標（実データ — 合計74%） ──
+        scores["liquidity"] = self._log_score(project.liquidity_usd, 5_000, 5_000_000)
+        scores["volume"] = self._log_score(project.volume_24h_usd, 2_000, 10_000_000)
         scores["price_change"] = self._price_change_score(project.price_change_24h)
-        scores["tx_count"] = self._log_score(project.tx_count_24h, 10, 50_000)
+        scores["tx_count"] = self._log_score(project.tx_count_24h, 50, 50_000)
+        scores["makers"] = self._log_score(project.makers_24h, 20, 10_000)
 
-        # ── ソーシャル（scanner では直接取得しないので 0 or 推定） ──
-        scores["twitter_followers"] = 0.0
-        scores["twitter_engagement"] = 0.0
-        scores["discord_members"] = 0.0
-        scores["discord_activity"] = 0.0
-        scores["github_commits"] = 0.0
-        scores["github_stars"] = 0.0
+        # ── プロジェクト信頼性指標（合計14%） ──
         scores["website_exists"] = 80.0 if project.website_url else 0.0
-        scores["audit_exists"] = 0.0
+        scores["twitter_exists"] = 80.0 if project.twitter_handle else 0.0
+        scores["audit_exists"] = 0.0  # 将来的に監査情報を取得
+
+        # ── 年齢ボーナス（2%）──
+        # 作成から3〜12時間が最も高評価（初期の熱狂期）
+        scores["age_bonus"] = self._age_score(project.created_at)
 
         # ── 重み付き合計 ──
         weighted = sum(
@@ -102,7 +107,12 @@ class Scorer:
             if whale_count >= 3:
                 smart_money_adj += 5.0
 
-        total = weighted + safety_adj + graduation_bonus + smart_money_adj
+        # ── ソーシャル存在ボーナス（Twitter + Website 両方あれば追加） ──
+        social_bonus = 0.0
+        if project.twitter_handle and project.website_url:
+            social_bonus = 3.0  # 両方揃っている = 真面目なプロジェクト
+
+        total = weighted + safety_adj + graduation_bonus + smart_money_adj + social_bonus
         total = max(0, min(100, total))
 
         # 結果保存
@@ -110,6 +120,7 @@ class Scorer:
         project.scores["_safety_adj"] = safety_adj
         project.scores["_graduation_bonus"] = graduation_bonus
         project.scores["_smart_money_adj"] = smart_money_adj
+        project.scores["_social_bonus"] = social_bonus
         project.total_score = round(total, 1)
 
         return project.total_score
@@ -136,21 +147,49 @@ class Scorer:
     def _price_change_score(change_24h: float) -> float:
         """
         価格変動スコア
-        +10~50% → 高評価
+        +10~50% → 高評価（健全な上昇）
         +50%超 → やや減点（過熱）
+        +200%超 → さらに減点（バブル警戒）
         マイナス → 低評価
         """
-        if change_24h >= 100:
-            return 50.0  # 過熱気味
+        if change_24h >= 200:
+            return 30.0   # バブル警戒
+        elif change_24h >= 100:
+            return 50.0   # 過熱気味
         elif change_24h >= 50:
             return 70.0
         elif change_24h >= 20:
             return 90.0
         elif change_24h >= 10:
-            return 100.0
+            return 100.0  # 最も健全な上昇
         elif change_24h >= 0:
             return 60.0 + change_24h * 4
         elif change_24h >= -20:
             return max(20, 60 + change_24h * 2)
+        elif change_24h >= -50:
+            return max(5, 20 + change_24h * 0.5)
         else:
-            return max(0, 20 + change_24h)
+            return 0.0    # -50%超は評価ゼロ
+
+    @staticmethod
+    def _age_score(created_at: datetime) -> float:
+        """
+        ペア年齢スコア
+        3〜12時間: 最高評価（初期の熱狂期、まだ早期参入可能）
+        1〜3時間: やや高い（超初期、リスク高め）
+        12〜24時間: 中程度（安定期に入りつつある）
+        24時間超: 低評価（もう初期ではない）
+        """
+        now = datetime.now(timezone.utc)
+        age_hours = (now - created_at).total_seconds() / 3600
+
+        if age_hours < 1:
+            return 40.0   # 超初期 — リスク高い
+        elif age_hours < 3:
+            return 70.0   # 初期 — まだリスクあり
+        elif age_hours < 12:
+            return 100.0  # ゴールデンタイム
+        elif age_hours < 24:
+            return 60.0   # 安定期
+        else:
+            return 30.0   # もう初期ではない

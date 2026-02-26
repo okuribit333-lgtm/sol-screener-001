@@ -77,8 +77,10 @@ class DexScreenerScanner:
     # ================================================================
     # メイン: 全ルートから新規ペアを収集
     # ================================================================
-    async def fetch_new_pairs(self, hours_back: int = 24) -> list[SolanaProject]:
+    async def fetch_new_pairs(self, hours_back: int = 0) -> list[SolanaProject]:
         """4 系統から新規ペアを収集"""
+        if hours_back <= 0:
+            hours_back = config.scan_hours_back
         results = await asyncio.gather(
             self._fetch_latest_profiles(),
             self._fetch_boosted_tokens(),

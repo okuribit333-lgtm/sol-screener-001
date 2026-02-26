@@ -1,4 +1,4 @@
-"""設定管理 — v4 完成版"""
+"""設定管理 — v5.5 フィルタ最適化版"""
 import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -42,29 +42,34 @@ class Config:
     watch_nfts: str = os.getenv("WATCH_NFTS", "")
 
     # ── スクリーニング設定 ──
-    top_n: int = int(os.getenv("TOP_N", "10"))
+    top_n: int = int(os.getenv("TOP_N", "7"))
     scan_interval_minutes: int = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
     morning_scan_hour: int = int(os.getenv("MORNING_SCAN_HOUR", "7"))
-    min_liquidity_usd: float = float(os.getenv("MIN_LIQUIDITY_USD", "5000"))
-    min_volume_24h_usd: float = float(os.getenv("MIN_VOLUME_24H_USD", "2000"))
+    min_liquidity_usd: float = float(os.getenv("MIN_LIQUIDITY_USD", "10000"))
+    min_volume_24h_usd: float = float(os.getenv("MIN_VOLUME_24H_USD", "5000"))
+    scan_hours_back: int = int(os.getenv("SCAN_HOURS_BACK", "12"))
+
+    # ── 品質フィルタ閾値（v5.5 強化） ──
+    min_mcap_usd: float = float(os.getenv("MIN_MCAP_USD", "30000"))
+    min_tx_count_24h: int = int(os.getenv("MIN_TX_COUNT_24H", "100"))
+    min_makers_24h: int = int(os.getenv("MIN_MAKERS_24H", "30"))
+    max_price_drop_24h: float = float(os.getenv("MAX_PRICE_DROP_24H", "-70"))
 
     # ── 安全性フィルタ閾値 ──
     danger_auto_exclude: bool = os.getenv("DANGER_AUTO_EXCLUDE", "true").lower() == "true"
 
-    # ── スコアリングの重み（合計 1.0） ──
+    # ── スコアリングの重み（合計 1.0）──
+    # v5.5: ソーシャル未取得分を実データ指標に再配分
     weights: dict = field(default_factory=lambda: {
-        "liquidity": 0.15,
-        "volume": 0.15,
-        "price_change": 0.10,
-        "tx_count": 0.10,
-        "twitter_followers": 0.10,
-        "twitter_engagement": 0.10,
-        "discord_members": 0.08,
-        "discord_activity": 0.07,
-        "github_commits": 0.05,
-        "github_stars": 0.05,
-        "website_exists": 0.03,
-        "audit_exists": 0.02,
+        "liquidity": 0.22,
+        "volume": 0.22,
+        "price_change": 0.15,
+        "tx_count": 0.15,
+        "makers": 0.10,
+        "website_exists": 0.06,
+        "twitter_exists": 0.05,
+        "audit_exists": 0.03,
+        "age_bonus": 0.02,
     })
 
 
