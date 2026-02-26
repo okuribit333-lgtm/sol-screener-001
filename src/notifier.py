@@ -727,80 +727,68 @@ class Notifier:
             },
         ]
 
-        # ソーシャルリンクフィールド
-        social_lines = []
+        # ソーシャル + 安全性統合フィールド（コンパクト）
+        social_parts = []
         if project.twitter_handle:
-            social_lines.append(f"𝕏 [@{project.twitter_handle}](https://x.com/{project.twitter_handle})")
+            social_parts.append(f"[𝕏](https://x.com/{project.twitter_handle})")
         if project.website_url:
-            social_lines.append(f"🌐 [Website]({project.website_url})")
+            social_parts.append(f"[🌐Web]({project.website_url})")
         if project.discord_url:
-            social_lines.append(f"💬 [Discord]({project.discord_url})")
+            social_parts.append(f"[💬DC]({project.discord_url})")
         if project.telegram_url:
-            social_lines.append(f"✈️ [Telegram]({project.telegram_url})")
-        if not social_lines:
-            social_lines.append("❌ なし")
+            social_parts.append(f"[✈️TG]({project.telegram_url})")
 
+        social_str = " | ".join(social_parts) if social_parts else "❌ なし"
         fields.append({
             "name": "🔗 ソーシャル",
-            "value": "\n".join(social_lines),
+            "value": social_str,
             "inline": True,
         })
 
-        # 安全性フィールド（v5.8 強化）
+        # 安全性フィールド（v5.8 コンパクト版）
         safety_lines = []
         if safety:
-            # RugCheck スコア
-            if safety.get("rugcheck_score") is not None:
-                rc = safety["rugcheck_score"]
-                rc_norm = safety.get("rugcheck_normalized")
-                rc_label = "Good" if rc >= 800 else "OK" if rc >= 400 else "Risk"
-                rc_str = f"RugCheck: `{rc}` ({rc_label})"
-                if rc_norm is not None:
-                    rc_str += f" [{rc_norm}/100]"
-                safety_lines.append(rc_str)
-
-            # LP Lock（%表示）
+            # LP + Mint + Freeze を1行に
+            auth_parts = []
             lp_pct = safety.get("lp_locked_pct")
             if lp_pct is not None:
-                if lp_pct >= 90:
-                    safety_lines.append(f"LP: 🔒`{lp_pct:.0f}%`ロック")
-                elif lp_pct > 0:
-                    safety_lines.append(f"LP: ⚠️`{lp_pct:.0f}%`ロック")
-                else:
-                    safety_lines.append("LP: ❌未ロック")
+                lp_icon = "🔒" if lp_pct >= 90 else "⚠️" if lp_pct > 0 else "❌"
+                auth_parts.append(f"LP{lp_icon}{lp_pct:.0f}%")
             elif safety.get("lp_locked") is not None:
-                lp_s = "🔒ロック" if safety["lp_locked"] else "❌未ロック"
-                safety_lines.append(f"LP: {lp_s}")
+                auth_parts.append("🔒LP" if safety["lp_locked"] else "❌LP")
+            mint = safety.get("mint_authority")
+            if mint:
+                auth_parts.append("✅Mint" if mint == "None" else "❌Mint")
+            frz = safety.get("freeze_authority")
+            if frz:
+                auth_parts.append("✅Frz" if frz == "None" else "⚠️Frz")
+            if auth_parts:
+                safety_lines.append(" | ".join(auth_parts))
 
-            # Mint権限
-            if safety.get("mint_authority"):
-                mint_s = "✅放棄" if safety["mint_authority"] == "None" else "❌未放棄"
-                safety_lines.append(f"Mint: {mint_s}")
+            # RugCheck
+            rc = safety.get("rugcheck_score")
+            if rc is not None:
+                rc_label = "✅" if rc >= 800 else "⚠️" if rc >= 400 else "❌"
+                safety_lines.append(f"RugCheck: `{rc}` {rc_label}")
 
-            # Freeze権限
-            if safety.get("freeze_authority"):
-                frz_s = "✅なし" if safety["freeze_authority"] == "None" else "⚠️あり"
-                safety_lines.append(f"Freeze: {frz_s}")
-
-            # Top Holders 集中度
-            if safety.get("top_holders_pct") is not None:
-                th = safety["top_holders_pct"]
-                th_label = "✅分散" if th < 30 else "⚠️注意" if th < 50 else "❌集中"
-                safety_lines.append(f"Top10: `{th:.1f}%` {th_label}")
-
-            # インサイダー
+            # Holders 1行
+            holder_parts = []
+            th = safety.get("top_holders_pct")
+            if th is not None:
+                th_icon = "✅" if th < 30 else "⚠️" if th < 50 else "❌"
+                holder_parts.append(f"Top10:{th:.0f}%{th_icon}")
             insider = safety.get("insider_count", 0)
             if insider > 0:
-                safety_lines.append(f"🕵️ Insider: `{insider}件`")
-
-            # ホルダー数
+                holder_parts.append(f"Insider:{insider}")
             total_h = safety.get("total_holders")
             if total_h:
-                safety_lines.append(f"👥 Holders: `{total_h:,}`")
+                holder_parts.append(f"Total:{total_h:,}")
+            if holder_parts:
+                safety_lines.append(" | ".join(holder_parts))
 
         if safety_lines:
             fields.append({
-                "name": f"{risk_emoji} 安全性チェック",
+                "name": f"{risk_emoji} 安全性",
                 "value": "\n".join(safety_lines),
                 "inline": True,
             })

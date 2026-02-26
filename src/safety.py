@@ -381,18 +381,22 @@ class SafetyChecker:
     # 一括チェック
     # ================================================================
     async def check_multiple(self, projects: list[SolanaProject]) -> dict[str, dict]:
-        """複数プロジェクトを一括チェック（並列実行）"""
+        """複数プロジェクトを一括チェック（レート制限対策: 同時3件 + 1秒間隔）"""
+        sem = asyncio.Semaphore(3)  # 同時最大3件
+
         async def _safe_check(p: SolanaProject) -> tuple[str, dict]:
-            try:
-                result = await self.check(p)
-                return p.token_address, result
-            except Exception as e:
-                logger.warning(f"Safety check failed for {p.symbol}: {e}")
-                return p.token_address, {
-                    "is_safe": True,
-                    "risk_level": "unknown",
-                    "warnings": [],
-                }
+            async with sem:
+                try:
+                    result = await self.check(p)
+                    await asyncio.sleep(1.0)  # レート制限回避
+                    return p.token_address, result
+                except Exception as e:
+                    logger.warning(f"Safety check failed for {p.symbol}: {e}")
+                    return p.token_address, {
+                        "is_safe": True,
+                        "risk_level": "unknown",
+                        "warnings": [],
+                    }
 
         tasks = [_safe_check(p) for p in projects]
         results_list = await asyncio.gather(*tasks)
