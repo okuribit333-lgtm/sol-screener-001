@@ -168,11 +168,11 @@ class Notifier:
             embed = self._build_project_embed(p, safety, sm)
             embeds.append(embed)
 
-        for i in range(0, len(embeds), 10):
-            chunk = embeds[i:i + 10]
+        for i in range(0, len(embeds), 3):
+            chunk = embeds[i:i + 3]
             await self._send_webhook({"embeds": chunk})
-            if i + 10 < len(embeds):
-                await asyncio.sleep(1)
+            if i + 3 < len(embeds):
+                await asyncio.sleep(1.5)
 
     # ================================================================
     # 2. Pump.fun 卒業通知 [🔴緊急]
@@ -657,11 +657,11 @@ class Notifier:
             }
             embeds.append(embed)
 
-        for i in range(0, len(embeds), 10):
-            chunk = embeds[i:i + 10]
+        for i in range(0, len(embeds), 3):
+            chunk = embeds[i:i + 3]
             await self._send_webhook({"embeds": chunk})
-            if i + 10 < len(embeds):
-                await asyncio.sleep(1)
+            if i + 3 < len(embeds):
+                await asyncio.sleep(1.5)
 
     # ================================================================
     # 9. 日次レポート [🟢情報]
