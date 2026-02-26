@@ -1,5 +1,5 @@
 """
-通知モジュール v5.6 — アクションリンク + 優先度タグ版
+通知モジュール v5.7 — NFT通知 + アクションリンク + 優先度タグ版
 
 ■ v5.6 改善点:
   - Jupiter スワップ直リンク（Phantom deeplink対応）
@@ -100,7 +100,7 @@ PRIORITY_URGENT = "🔴 緊急"    # TGE初動/NFTミント/大口移動/卒業
 PRIORITY_NORMAL = "🟡 通常"    # 定期スキャン/エアドロ
 PRIORITY_INFO   = "🟢 情報"    # 日次レポート/ステータス
 
-VERSION = "v5.6"
+VERSION = "v5.7"
 FOOTER_BASE = f"Sol Screener {VERSION}"
 
 
@@ -459,7 +459,120 @@ class Notifier:
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 8. エアドロップ通知 [🟡通常]
+    # 8. NFT 新規ミント通知 [🔴緊急] ★NEW v5.7
+    # ================================================================
+    async def send_nft_mint_alert(self, mint):
+        """新規NFTミント情報をDiscordに通知"""
+        if not self.webhook_url:
+            return
+
+        # ローンチ日表示
+        if mint.launch_date:
+            launch_str = mint.launch_date.strftime('%Y-%m-%d %H:%M UTC')
+        else:
+            launch_str = '未定'
+
+        status = '🔜 ミント予定' if mint.is_upcoming else '✅ ミント済み'
+        if mint.is_upcoming and mint.days_until_launch > 0:
+            status += f' (あと{mint.days_until_launch}日)'
+
+        desc_lines = [
+            f'**{mint.name}** がMagic Edenに登場',
+            f'{status}',
+            '',
+        ]
+        if mint.description:
+            desc_lines.append(f'> {mint.description[:150]}')
+            desc_lines.append('')
+
+        fields = [
+            {'name': '💰 ミント価格', 'value': f'`{mint.mint_price:.2f} SOL`', 'inline': True},
+            {'name': '📦 供給量', 'value': f'`{mint.supply:,}`', 'inline': True},
+            {'name': '📅 ローンチ', 'value': f'`{launch_str}`', 'inline': True},
+        ]
+
+        # 二次市場データ（ミント済みの場合）
+        if not mint.is_upcoming and mint.floor_price > 0:
+            profit_pct = ((mint.floor_price / mint.mint_price) - 1) * 100 if mint.mint_price > 0 else 0
+            profit_emoji = '📈' if profit_pct >= 0 else '📉'
+            fields.extend([
+                {'name': '🏷️ フロア価格', 'value': f'`{mint.floor_price:.3f} SOL`', 'inline': True},
+                {'name': f'{profit_emoji} 損益', 'value': f'`{profit_pct:+.1f}%`', 'inline': True},
+                {'name': '📋 出品数', 'value': f'`{mint.listed_count:,}`', 'inline': True},
+            ])
+
+        # Magic Edenリンク
+        me_url = f'https://magiceden.io/marketplace/{mint.symbol}'
+        fields.append({
+            'name': '🔗 アクション',
+            'value': f'[**Magic Eden**]({me_url})',
+            'inline': False,
+        })
+
+        if mint.is_upcoming:
+            color = self.COLOR_CYAN
+        elif mint.floor_price > mint.mint_price:
+            color = self.COLOR_GREEN
+        else:
+            color = self.COLOR_YELLOW
+
+        embed = {
+            'title': f'{PRIORITY_URGENT} 🖼️ NFTミント: {mint.name}',
+            'description': '\n'.join(desc_lines),
+            'color': color,
+            'fields': fields,
+            'footer': {
+                'text': (
+                    f'Score: {mint.score:.1f}/100 | '
+                    f'{mint.mint_price:.2f} SOL x {mint.supply:,} | '
+                    f'{FOOTER_BASE}'
+                )
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+
+        if mint.image:
+            embed['thumbnail'] = {'url': mint.image}
+
+        await self._send_webhook({'embeds': [embed]})
+
+    # ================================================================
+    # 9. NFT フロア価格急変通知 [🔴緊急] ★NEW v5.7
+    # ================================================================
+    async def send_nft_floor_alert(self, alert):
+        """NFTフロア価格の急変をDiscordに通知"""
+        if not self.webhook_url:
+            return
+
+        direction = '急騰 📈' if alert.alert_type == 'pump' else '急落 📉'
+        color = self.COLOR_GREEN if alert.alert_type == 'pump' else self.COLOR_RED
+
+        me_url = f'https://magiceden.io/marketplace/{alert.symbol}'
+
+        desc_lines = [
+            f'**{alert.name}** のフロア価格が **{alert.change_pct:+.1f}%** {direction}',
+            '',
+            f'🏷️ 前回: `{alert.prev_floor:.3f} SOL` → 現在: `{alert.current_floor:.3f} SOL`',
+            f'📋 出品数: `{alert.listed_count:,}`',
+            '',
+            f'🔗 [**Magic Eden**]({me_url})',
+        ]
+
+        embed = {
+            'title': f'{PRIORITY_URGENT} 🖼️ NFTフロア{direction}: {alert.name}',
+            'description': '\n'.join(desc_lines),
+            'color': color,
+            'footer': {'text': f'{alert.change_pct:+.1f}% | {FOOTER_BASE}'},
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+
+        if alert.image:
+            embed['thumbnail'] = {'url': alert.image}
+
+        await self._send_webhook({'embeds': [embed]})
+
+    # ================================================================
+    # 10. エアドロップ通知 [🟡通常]
     # ================================================================
     async def send_airdrop_report(self, airdrops: list, title: str = "✈️ エアドロップ情報"):
         if not self.webhook_url or not airdrops:

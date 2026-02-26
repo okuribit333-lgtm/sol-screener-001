@@ -71,6 +71,7 @@ from src.market_events import (
     NFTFloorMonitor,
     MemeChartMonitor,
 )
+from src.nft import NFTMonitor
 from src.airdrop import AirdropScanner
 from src.x_monitor import XMonitor
 from src.discord_bot import DiscordBot
@@ -92,6 +93,7 @@ tge_monitor: TGEMonitor = None
 nft_floor_monitor: NFTFloorMonitor = None
 meme_monitor: MemeChartMonitor = None
 airdrop_scanner: AirdropScanner = None
+nft_monitor: NFTMonitor = None
 x_monitor: XMonitor = None
 discord_bot: DiscordBot = None
 
@@ -102,7 +104,7 @@ async def init():
     global pumpfun_detector, mania_scorer, expectation_calc
     global wallet_monitor, liquidity_monitor, sol_range_monitor
     global tge_monitor, nft_floor_monitor, meme_monitor
-    global airdrop_scanner, x_monitor, discord_bot
+    global airdrop_scanner, nft_monitor, x_monitor, discord_bot
 
     timeout = aiohttp.ClientTimeout(total=30)
     session = aiohttp.ClientSession(timeout=timeout)
@@ -122,6 +124,7 @@ async def init():
     nft_floor_monitor = NFTFloorMonitor(session)
     meme_monitor = MemeChartMonitor(session)
     airdrop_scanner = AirdropScanner(session)
+    nft_monitor = NFTMonitor(session)
 
     # X（Twitter）監視
     x_monitor = XMonitor()
@@ -143,7 +146,7 @@ async def init():
     else:
         logger.info("🤖 Discord Bot: 無効（DISCORD_BOT_TOKEN 未設定）")
 
-    logger.info("✅ 全モジュール初期化完了（v5.6）")
+    logger.info("✅ 全モジュール初期化完了（v5.7）")
 
 
 def _get_filter_info() -> dict:
@@ -163,7 +166,7 @@ def _get_filter_info() -> dict:
 def _get_status_info() -> dict:
     """ステータス情報を返す（/status コマンド用）"""
     return {
-        "version": "v5.6",
+        "version": "v5.7",
         "notified_count": state.get_notified_count() if state else 0,
         "x_monitor": x_monitor.is_available if x_monitor else False,
         "discord_bot": discord_bot.is_available if discord_bot else False,
@@ -359,7 +362,39 @@ async def run_realtime_monitor():
         except Exception as e:
             logger.debug(f"Meme監視エラー: {e}")
 
-        # ── 6. TGE 検知 ──
+        # ── 6. NFT ミント監視 ──
+        try:
+            nft_result = await nft_monitor.full_scan()
+
+            # 新規ミント通知
+            sent_nft = 0
+            for mint in nft_result.get('new_mints', []):
+                if sent_nft >= 3:
+                    break
+                nft_key = f"nft_mint_{mint.symbol}"
+                if state.is_notified(nft_key):
+                    continue
+                await notifier.send_nft_mint_alert(mint)
+                state.mark_notified(nft_key, mint.name, mint.score)
+                sent_nft += 1
+
+            # フロア価格急変通知
+            for alert in nft_result.get('floor_alerts', []):
+                floor_key = f"nft_floor_{alert.symbol}"
+                if state.is_notified(floor_key):
+                    continue
+                await notifier.send_nft_floor_alert(alert)
+                state.mark_notified(floor_key, alert.name)
+
+            if sent_nft > 0 or nft_result.get('floor_alerts'):
+                logger.info(
+                    f"🖼️ NFT通知: ミント{sent_nft}件 + "
+                    f"フロアアラート{len(nft_result.get('floor_alerts', []))}件"
+                )
+        except Exception as e:
+            logger.debug(f"NFT監視エラー: {e}")
+
+        # ── 7. TGE 検知 ──
         try:
             tge_events = await tge_monitor.check_new_launches()
             sent_count = 0
@@ -646,7 +681,7 @@ async def run_daily_report():
 async def main():
     """エントリーポイント"""
     logger.info("=" * 60)
-    logger.info("🚀 Solana Auto Screener v5.6 起動")
+    logger.info("🚀 Solana Auto Screener v5.7 起動")
     logger.info("=" * 60)
 
     if not config.discord_webhook_url:
@@ -675,17 +710,20 @@ async def main():
         bot_status = "ON" if (discord_bot and discord_bot.is_available) else "OFF（DISCORD_BOT_TOKEN 未設定）"
 
         await notifier.send_text(
-            "**Solana Auto Screener v5.6** が起動しました\n\n"
+            "**Solana Auto Screener v5.7** が起動しました\n\n"
             f"⚡ リアルタイム: {config.realtime_interval}分間隔\n"
             f"🔍 フルスキャン: {config.scan_interval_minutes}分間隔 (Top {config.top_n})\n"
             f"⏰ スキャン時間窓: 直近{config.scan_hours_back}時間\n"
             f"✈️ エアドロスキャン: 9時/21時 JST\n"
+            f"🖼️ NFTミント監視: 5分間隔\n"
             f"🎓 Pump.fun検知: {'ON' if config.enable_pumpfun else 'OFF'}\n"
             f"🧠 スマートマネー: {'ON' if config.enable_smart_money else 'OFF'}\n"
             f"🛡️ 危険自動除外: {'ON' if config.danger_auto_exclude else 'OFF'}\n"
             f"🐦 X Monitor: {x_status} (@solana)\n"
             f"🤖 Discord Bot: {bot_status}\n\n"
-            "**■ v5.6 新機能:**\n"
+            "**■ v5.7 新機能:**\n"
+            "🖼️ NFTミント監視（Magic Eden Launchpad）\n"
+            "🏷️ NFTフロア価格急変アラート\n"
             "⚡ Jupiter スワップ直リンク（Phantom対応）\n"
             "🐦 @solana ツイート自動通知\n"
             "🔴🟡🟢 優先度タグ付き通知\n"
@@ -701,7 +739,7 @@ async def main():
             "🟡 通常 = 定期スキャン/エアドロ\n"
             "🟢 情報 = レポート/ステータス\n"
             "⚡ Jupiter = タップでPhantomスワップ直行",
-            title="🚀 Bot 起動 v5.6",
+            title="🚀 Bot 起動 v5.7",
         )
     except Exception as e:
         logger.warning(f"起動通知エラー: {e}")
