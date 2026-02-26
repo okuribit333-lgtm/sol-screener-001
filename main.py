@@ -1,5 +1,5 @@
 """
-Solana Auto Screener v5.6 — アクションリンク + X監視 + Discord Bot版
+Solana Auto Screener v5.8 — 信頼性チェック強化版
 Railway Worker モードで動作
 
 ■ v5.6 新機能:
@@ -146,7 +146,7 @@ async def init():
     else:
         logger.info("🤖 Discord Bot: 無効（DISCORD_BOT_TOKEN 未設定）")
 
-    logger.info("✅ 全モジュール初期化完了（v5.7）")
+    logger.info("✅ 全モジュール初期化完了（v5.8）")
 
 
 def _get_filter_info() -> dict:
@@ -166,7 +166,7 @@ def _get_filter_info() -> dict:
 def _get_status_info() -> dict:
     """ステータス情報を返す（/status コマンド用）"""
     return {
-        "version": "v5.7",
+        "version": "v5.8",
         "notified_count": state.get_notified_count() if state else 0,
         "x_monitor": x_monitor.is_available if x_monitor else False,
         "discord_bot": discord_bot.is_available if discord_bot else False,

@@ -1,16 +1,16 @@
 """
-安全性チェック v4 — ラグプル / ハニーポット / LP Lock / ミント権限 検知
-RugCheck.xyz API + Solana RPC（ミント権限直接チェック）で動作
+安全性チェック v5.8 — 信頼性チェック強化版
 
-強化ポイント:
-  - RugCheck API でリスクスコア・LP Lock・Top Holders を取得
-  - Solana RPC getAccountInfo でミント権限を直接確認
-  - danger レベルのトークンを自動除外するオプション
+v5.8 変更点:
+  - RugCheck フルレポート（/report）に切替: LP lock%, insider, markets 取得
+  - LP locked percentage を数値で取得
+  - インサイダーネットワーク検出
+  - Top Holders 集中度チェック強化（config閾値対応）
+  - launchpad / deployPlatform 情報取得
+  - 安全性サマリーを通知用に構造化
 """
 import asyncio
-import base64
 import logging
-import struct
 from typing import Optional
 
 import aiohttp
@@ -20,16 +20,10 @@ from .scanner import SolanaProject
 
 logger = logging.getLogger(__name__)
 
-# Solana SPL Token プログラム定数
-TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-
 
 class SafetyChecker:
     """
-    無料 API でトークンの安全性をチェック
-    - RugCheck.xyz: ラグプルリスクスコア（無料、キー不要）
-    - Solana RPC: ミント権限確認（無料）
+    RugCheck.xyz フルレポート + Solana RPC でトークンの安全性をチェック
     """
 
     RUGCHECK_API = "https://api.rugcheck.xyz/v1"
@@ -50,8 +44,8 @@ class SafetyChecker:
     async def check(self, project: SolanaProject) -> dict:
         """全チェックを実行して結果を返す"""
         results = await asyncio.gather(
-            self._rugcheck(project.token_address),
-            self._check_mint_authority(project.token_address),
+            self._rugcheck_full(project.token_address),
+            self._check_mint_authority_rpc(project.token_address),
             return_exceptions=True,
         )
 
@@ -62,85 +56,47 @@ class SafetyChecker:
             "is_safe": True,
             "risk_level": "unknown",
             "warnings": [],
+            # RugCheck
             "rugcheck_score": None,
+            "rugcheck_normalized": None,
             "rugcheck_status": None,
+            # 権限
             "mint_authority": None,
             "freeze_authority": None,
+            # LP
             "lp_locked": None,
+            "lp_locked_pct": None,
+            "lp_locked_usd": None,
+            "lp_providers": None,
+            # Holders
             "top_holders_pct": None,
             "top_holders_detail": [],
+            "insider_count": 0,
+            "total_holders": None,
+            # メタ
+            "launchpad": None,
+            "deploy_platform": None,
+            "creator": None,
+            "creator_balance_pct": None,
         }
 
-        # ── RugCheck 結果を反映 ──
+        # ── RugCheck フルレポート結果を反映 ──
         if rugcheck:
-            score = rugcheck.get("score", 0)
-            status = rugcheck.get("tokenMeta", {}).get("status", "")
-            safety["rugcheck_score"] = score
-            safety["rugcheck_status"] = status
-            risks = rugcheck.get("risks", [])
+            self._process_rugcheck(rugcheck, safety)
 
-            for risk in risks:
-                name = risk.get("name", "")
-                level = risk.get("level", "")
-                desc = risk.get("description", "")
-
-                if level in ("danger", "critical"):
-                    safety["warnings"].append(f"🔴 {name}: {desc}")
-                elif level == "warn":
-                    safety["warnings"].append(f"🟡 {name}: {desc}")
-
-            # LP Lock
-            lp_locked = not any(
-                "lp" in r.get("name", "").lower()
-                and r.get("level") in ("danger", "critical")
-                for r in risks
-            )
-            safety["lp_locked"] = lp_locked
-            if not lp_locked:
-                safety["warnings"].append("🔴 LP未ロック（ラグプルリスク）")
-
-            # Top Holders 集中度
-            top_holders = rugcheck.get("topHolders", [])
-            if top_holders:
-                total_pct = sum(h.get("pct", 0) for h in top_holders[:10])
-                safety["top_holders_pct"] = round(total_pct, 1)
-                safety["top_holders_detail"] = [
-                    {
-                        "address": h.get("address", "")[:8] + "...",
-                        "pct": round(h.get("pct", 0), 2),
-                        "isInsider": h.get("isInsider", False),
-                    }
-                    for h in top_holders[:10]
-                ]
-                if total_pct > 50:
-                    safety["warnings"].append(
-                        f"🔴 上位10ホルダーが{total_pct:.0f}%保有（集中リスク）"
-                    )
-                elif total_pct > 30:
-                    safety["warnings"].append(
-                        f"🟡 上位10ホルダーが{total_pct:.0f}%保有"
-                    )
-
-                # インサイダー検出
-                insider_count = sum(
-                    1 for h in top_holders[:10] if h.get("isInsider")
-                )
-                if insider_count >= 3:
-                    safety["warnings"].append(
-                        f"🔴 インサイダーウォレット{insider_count}件検出"
-                    )
-
-        # ── ミント権限（RPC 直接チェック） ──
+        # ── ミント権限（RPC 直接チェック — RugCheckのフォールバック） ──
         if mint_info:
-            mint_auth = mint_info.get("mint_authority")
-            freeze_auth = mint_info.get("freeze_authority")
-            safety["mint_authority"] = mint_auth
-            safety["freeze_authority"] = freeze_auth
+            # RugCheckで取得できなかった場合のみRPC結果を使用
+            if safety["mint_authority"] is None:
+                safety["mint_authority"] = mint_info.get("mint_authority")
+            if safety["freeze_authority"] is None:
+                safety["freeze_authority"] = mint_info.get("freeze_authority")
 
-            if mint_auth and mint_auth != "None":
-                safety["warnings"].append("🔴 ミント権限が放棄されていない（無限発行リスク）")
-            if freeze_auth and freeze_auth != "None":
-                safety["warnings"].append("🟡 フリーズ権限あり（アカウント凍結リスク）")
+        # ── ミント/フリーズ権限の警告 ──
+        if safety["mint_authority"] and safety["mint_authority"] != "None":
+            safety["warnings"].append("🔴 ミント権限が放棄されていない（無限発行リスク）")
+        if safety["freeze_authority"] and safety["freeze_authority"] != "None":
+            safety["warnings"].append("🟡 フリーズ権限あり（アカウント凍結リスク）")
 
         # ── リスクレベル判定 ──
         danger_count = sum(1 for w in safety["warnings"] if "🔴" in w)
@@ -159,33 +115,182 @@ class SafetyChecker:
         return safety
 
     # ================================================================
-    # RugCheck API
+    # RugCheck フルレポート処理
     # ================================================================
-    async def _rugcheck(self, token_address: str) -> dict:
-        """RugCheck.xyz API からトークンレポートを取得"""
+    def _process_rugcheck(self, data: dict, safety: dict):
+        """RugCheckフルレポートのデータを安全性辞書に反映"""
+
+        # スコア
+        score = data.get("score", 0)
+        normalized = data.get("score_normalised", None)
+        safety["rugcheck_score"] = score
+        safety["rugcheck_normalized"] = normalized
+
+        # 権限（RugCheckから直接取得）
+        mint_auth = data.get("mintAuthority")
+        freeze_auth = data.get("freezeAuthority")
+        if mint_auth is not None:
+            safety["mint_authority"] = mint_auth if mint_auth else "None"
+        if freeze_auth is not None:
+            safety["freeze_authority"] = freeze_auth if freeze_auth else "None"
+
+        # メタ情報
+        safety["launchpad"] = data.get("launchpad")
+        safety["deploy_platform"] = data.get("deployPlatform")
+        safety["total_holders"] = data.get("totalHolders")
+        safety["lp_providers"] = data.get("totalLPProviders")
+
+        # Creator情報
+        creator = data.get("creator")
+        if creator:
+            safety["creator"] = creator[:12] + "..." if len(creator) > 12 else creator
+        creator_balance = data.get("creatorBalance", 0)
+        if creator_balance and creator_balance > 0:
+            safety["creator_balance_pct"] = creator_balance
+
+        # ── LP Lock 情報（marketsから集計） ──
+        markets = data.get("markets", [])
+        if markets:
+            total_lp_locked_usd = 0
+            best_lock_pct = 0
+            for m in markets:
+                lp = m.get("lp", {})
+                if isinstance(lp, dict):
+                    lock_pct = lp.get("lpLockedPct", 0) or 0
+                    lock_usd = lp.get("lpLockedUSD", 0) or 0
+                    if lock_pct > best_lock_pct:
+                        best_lock_pct = lock_pct
+                    total_lp_locked_usd += lock_usd
+
+            safety["lp_locked_pct"] = round(best_lock_pct, 1)
+            safety["lp_locked_usd"] = round(total_lp_locked_usd, 2)
+            safety["lp_locked"] = best_lock_pct > 0
+
+            if best_lock_pct == 0:
+                safety["warnings"].append("🔴 LP未ロック（ラグプルリスク）")
+            elif best_lock_pct < 50:
+                safety["warnings"].append(f"🟡 LP一部ロック（{best_lock_pct:.0f}%）")
+        else:
+            # marketsがない場合、summaryのlpLockedPctを使用
+            lp_pct = data.get("lpLockedPct")
+            if lp_pct is not None:
+                safety["lp_locked_pct"] = round(lp_pct, 1)
+                safety["lp_locked"] = lp_pct > 0
+
+        # ── Top Holders 集中度 ──
+        top_holders = data.get("topHolders", [])
+        if top_holders:
+            total_pct = sum(h.get("pct", 0) for h in top_holders[:10])
+            safety["top_holders_pct"] = round(total_pct, 1)
+            safety["top_holders_detail"] = [
+                {
+                    "address": h.get("address", "")[:8] + "...",
+                    "pct": round(h.get("pct", 0), 2),
+                    "isInsider": h.get("isInsider", False),
+                }
+                for h in top_holders[:10]
+            ]
+
+            # 集中度警告
+            danger_pct = config.top_holders_danger_pct
+            warn_pct = config.top_holders_warn_pct
+            if total_pct > danger_pct:
+                safety["warnings"].append(
+                    f"🔴 上位10ホルダーが{total_pct:.0f}%保有（集中リスク）"
+                )
+            elif total_pct > warn_pct:
+                safety["warnings"].append(
+                    f"🟡 上位10ホルダーが{total_pct:.0f}%保有"
+                )
+
+            # インサイダー検出
+            insider_count = sum(
+                1 for h in top_holders[:10] if h.get("isInsider")
+            )
+            safety["insider_count"] = insider_count
+            if insider_count >= config.insider_danger_count:
+                safety["warnings"].append(
+                    f"🔴 インサイダーウォレット{insider_count}件検出"
+                )
+            elif insider_count >= 1:
+                safety["warnings"].append(
+                    f"🟡 インサイダーウォレット{insider_count}件検出"
+                )
+
+        # ── インサイダーネットワーク ──
+        insider_detected = data.get("graphInsidersDetected", False)
+        if insider_detected:
+            networks = data.get("insiderNetworks", [])
+            net_count = len(networks) if networks else 0
+            if net_count > 0:
+                safety["warnings"].append(
+                    f"🔴 インサイダーネットワーク{net_count}件検出"
+                )
+
+        # ── リスク項目 ──
+        risks = data.get("risks", [])
+        for risk in risks:
+            name = risk.get("name", "")
+            level = risk.get("level", "")
+            desc = risk.get("description", "")
+
+            # LP関連は上で処理済みなのでスキップ
+            if "lp" in name.lower() and "lock" in name.lower():
+                continue
+
+            if level in ("danger", "critical"):
+                safety["warnings"].append(f"🔴 {name}: {desc[:80]}")
+            elif level == "warn":
+                safety["warnings"].append(f"🟡 {name}: {desc[:80]}")
+
+    # ================================================================
+    # RugCheck API（フルレポート）
+    # ================================================================
+    async def _rugcheck_full(self, token_address: str) -> dict:
+        """RugCheck.xyz API からフルレポートを取得"""
+        try:
+            url = f"{self.RUGCHECK_API}/tokens/{token_address}/report"
+            async with self.session.get(
+                url, timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    logger.info(
+                        f"  RugCheck Full: score={data.get('score', 'N/A')}, "
+                        f"normalized={data.get('score_normalised', 'N/A')}, "
+                        f"holders={data.get('totalHolders', 'N/A')}, "
+                        f"markets={len(data.get('markets', []))}"
+                    )
+                    return data
+                elif resp.status == 429:
+                    # レート制限 → summaryにフォールバック
+                    logger.warning("  RugCheck rate limited, falling back to summary")
+                    return await self._rugcheck_summary(token_address)
+                else:
+                    logger.debug(f"  RugCheck Full: status={resp.status}")
+                    return {}
+        except Exception as e:
+            logger.debug(f"  RugCheck Full error: {e}")
+            return {}
+
+    async def _rugcheck_summary(self, token_address: str) -> dict:
+        """RugCheck summary（フォールバック用）"""
         try:
             url = f"{self.RUGCHECK_API}/tokens/{token_address}/report/summary"
             async with self.session.get(
                 url, timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    logger.info(
-                        f"  RugCheck: score={data.get('score', 'N/A')}, "
-                        f"risks={len(data.get('risks', []))}"
-                    )
-                    return data
-                else:
-                    logger.debug(f"  RugCheck: status={resp.status}")
-                    return {}
+                    return await resp.json()
+                return {}
         except Exception as e:
-            logger.debug(f"  RugCheck error: {e}")
+            logger.debug(f"  RugCheck Summary error: {e}")
             return {}
 
     # ================================================================
-    # Solana RPC: ミント権限チェック
+    # Solana RPC: ミント権限チェック（フォールバック）
     # ================================================================
-    async def _check_mint_authority(self, token_address: str) -> dict:
+    async def _check_mint_authority_rpc(self, token_address: str) -> dict:
         """Solana RPC getAccountInfo でミント権限を直接確認"""
         result: dict = {"mint_authority": None, "freeze_authority": None}
         try:
@@ -229,6 +334,48 @@ class SafetyChecker:
             logger.debug(f"  Mint authority check error: {e}")
 
         return result
+
+    # ================================================================
+    # 安全性サマリー（通知用の簡潔な文字列）
+    # ================================================================
+    @staticmethod
+    def format_safety_summary(safety: dict) -> str:
+        """安全性データを1行サマリーに変換"""
+        parts = []
+
+        # リスクレベル
+        level = safety.get("risk_level", "unknown")
+        level_emoji = {"safe": "✅", "warning": "⚠️", "danger": "🔴"}.get(level, "❓")
+        parts.append(level_emoji)
+
+        # LP Lock
+        lp_pct = safety.get("lp_locked_pct")
+        if lp_pct is not None:
+            if lp_pct >= 90:
+                parts.append(f"LP🔒{lp_pct:.0f}%")
+            elif lp_pct > 0:
+                parts.append(f"LP⚠️{lp_pct:.0f}%")
+            else:
+                parts.append("LP❌")
+
+        # Mint
+        mint = safety.get("mint_authority")
+        if mint == "None":
+            parts.append("Mint✅")
+        elif mint:
+            parts.append("Mint❌")
+
+        # Top Holders
+        top_pct = safety.get("top_holders_pct")
+        if top_pct is not None:
+            if top_pct < 30:
+                parts.append(f"分散✅{top_pct:.0f}%")
+            elif top_pct < 50:
+                parts.append(f"集中⚠️{top_pct:.0f}%")
+            else:
+                parts.append(f"集中❌{top_pct:.0f}%")
+
+        return " | ".join(parts)
 
     # ================================================================
     # 一括チェック

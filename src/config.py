@@ -1,4 +1,4 @@
-"""設定管理 — v5.5 フィルタ最適化版"""
+"""設定管理 — v5.8 信頼性チェック強化版"""
 import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -58,18 +58,22 @@ class Config:
     # ── 安全性フィルタ閾値 ──
     danger_auto_exclude: bool = os.getenv("DANGER_AUTO_EXCLUDE", "true").lower() == "true"
 
+    # ── 信頼性チェック閾値（v5.8） ──
+    top_holders_danger_pct: float = float(os.getenv("TOP_HOLDERS_DANGER_PCT", "50"))
+    top_holders_warn_pct: float = float(os.getenv("TOP_HOLDERS_WARN_PCT", "30"))
+    insider_danger_count: int = int(os.getenv("INSIDER_DANGER_COUNT", "3"))
+
     # ── スコアリングの重み（合計 1.0）──
-    # v5.5: ソーシャル未取得分を実データ指標に再配分
+    # v5.8: ソーシャル信頼性15% + 安全性データ15% を新設
     weights: dict = field(default_factory=lambda: {
-        "liquidity": 0.22,
-        "volume": 0.22,
-        "price_change": 0.15,
-        "tx_count": 0.15,
-        "makers": 0.10,
-        "website_exists": 0.06,
-        "twitter_exists": 0.05,
-        "audit_exists": 0.03,
-        "age_bonus": 0.02,
+        "liquidity":        0.18,   # 流動性
+        "volume":           0.18,   # 取引量
+        "price_change":     0.12,   # 価格変動
+        "tx_count":         0.10,   # TX数
+        "makers":           0.10,   # ユニークトレーダー数
+        "social_presence":  0.15,   # ソーシャル信頼性（Twitter/Web/Discord/TG）
+        "safety_score":     0.15,   # 安全性データ（LP lock/Mint/Holders）
+        "age_bonus":        0.02,   # ペア年齢
     })
 
 

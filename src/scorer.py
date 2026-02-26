@@ -1,11 +1,11 @@
 """
-スコアラー v5.5 — 実データ重視の多次元スコアリング
+スコアラー v5.8 — 信頼性チェック強化版
 
-v5.5 変更点:
-  - ソーシャル未取得分（45%）を実データ指標に再配分
-  - makers（ユニークトレーダー数）を新規追加
-  - twitter_exists（Xアカウント有無）を新規追加
-  - age_bonus（ペア作成からの経過時間）を新規追加
+v5.8 変更点:
+  - ソーシャルリンクスコアリングを3%→15%に引き上げ
+  - Twitter/Discord/Telegram/Website の有無を個別評価
+  - 安全性データ（LP lock, top holders, insider）をスコアに反映
+  - 信頼性ボーナス: 複数ソーシャル存在 + LP locked + 低集中度
   - スコアは 0-100 で正規化
 """
 import math
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class Scorer:
-    """多次元スコアリングエンジン v5.5"""
+    """多次元スコアリングエンジン v5.8"""
 
     def __init__(self):
         self.weights = config.weights
@@ -38,20 +38,20 @@ class Scorer:
         """
         scores: dict[str, float] = {}
 
-        # ── マーケット指標（実データ — 合計74%） ──
+        # ── マーケット指標（実データ — 合計60%） ──
         scores["liquidity"] = self._log_score(project.liquidity_usd, 5_000, 5_000_000)
         scores["volume"] = self._log_score(project.volume_24h_usd, 2_000, 10_000_000)
         scores["price_change"] = self._price_change_score(project.price_change_24h)
         scores["tx_count"] = self._log_score(project.tx_count_24h, 50, 50_000)
         scores["makers"] = self._log_score(project.makers_24h, 20, 10_000)
 
-        # ── プロジェクト信頼性指標（合計14%） ──
-        scores["website_exists"] = 80.0 if project.website_url else 0.0
-        scores["twitter_exists"] = 80.0 if project.twitter_handle else 0.0
-        scores["audit_exists"] = 0.0  # 将来的に監査情報を取得
+        # ── ソーシャル信頼性（合計15%） ──
+        scores["social_presence"] = self._social_presence_score(project)
+
+        # ── 安全性スコア（合計15%） ──
+        scores["safety_score"] = self._safety_data_score(safety)
 
         # ── 年齢ボーナス（2%）──
-        # 作成から3〜12時間が最も高評価（初期の熱狂期）
         scores["age_bonus"] = self._age_score(project.created_at)
 
         # ── 重み付き合計 ──
@@ -59,7 +59,7 @@ class Scorer:
             scores.get(k, 0) * w for k, w in self.weights.items()
         )
 
-        # ── 安全性ボーナス / ペナルティ ──
+        # ── 安全性ボーナス / ペナルティ（加算式） ──
         safety_adj = 0.0
         if safety:
             risk = safety.get("risk_level", "unknown")
@@ -70,19 +70,11 @@ class Scorer:
             elif risk == "safe":
                 safety_adj = +5.0
 
-            # LP ロック済みボーナス
-            if safety.get("lp_locked"):
-                safety_adj += 5.0
-
-            # ミント権限放棄ボーナス
-            if safety.get("mint_authority") == "None":
-                safety_adj += 5.0
-
             # RugCheck スコアが高い（低リスク）
             rc_score = safety.get("rugcheck_score")
             if rc_score is not None:
                 if rc_score >= 800:
-                    safety_adj += 5.0
+                    safety_adj += 3.0
                 elif rc_score <= 200:
                     safety_adj -= 10.0
 
@@ -107,12 +99,10 @@ class Scorer:
             if whale_count >= 3:
                 smart_money_adj += 5.0
 
-        # ── ソーシャル存在ボーナス（Twitter + Website 両方あれば追加） ──
-        social_bonus = 0.0
-        if project.twitter_handle and project.website_url:
-            social_bonus = 3.0  # 両方揃っている = 真面目なプロジェクト
+        # ── 信頼性コンボボーナス ──
+        trust_bonus = self._trust_combo_bonus(project, safety)
 
-        total = weighted + safety_adj + graduation_bonus + smart_money_adj + social_bonus
+        total = weighted + safety_adj + graduation_bonus + smart_money_adj + trust_bonus
         total = max(0, min(100, total))
 
         # 結果保存
@@ -120,10 +110,143 @@ class Scorer:
         project.scores["_safety_adj"] = safety_adj
         project.scores["_graduation_bonus"] = graduation_bonus
         project.scores["_smart_money_adj"] = smart_money_adj
-        project.scores["_social_bonus"] = social_bonus
+        project.scores["_trust_bonus"] = trust_bonus
         project.total_score = round(total, 1)
 
         return project.total_score
+
+    # ================================================================
+    # ソーシャル信頼性スコア（0-100）
+    # ================================================================
+    def _social_presence_score(self, project: SolanaProject) -> float:
+        """
+        ソーシャルリンクの存在を評価
+        Twitter + Website + Discord + Telegram の有無で段階的にスコア
+        """
+        score = 0.0
+        count = 0
+
+        # Twitter（最重要: 40点）
+        if project.twitter_handle:
+            score += 40.0
+            count += 1
+
+        # Website（重要: 30点）
+        if project.website_url:
+            score += 30.0
+            count += 1
+
+        # Discord（中: 15点）
+        if project.discord_url:
+            score += 15.0
+            count += 1
+
+        # Telegram（中: 15点）
+        if project.telegram_url:
+            score += 15.0
+            count += 1
+
+        return min(100.0, score)
+
+    # ================================================================
+    # 安全性データスコア（0-100）
+    # ================================================================
+    def _safety_data_score(self, safety: Optional[dict]) -> float:
+        """
+        RugCheck / LP Lock / Top Holders / Mint権限のデータからスコアリング
+        """
+        if not safety:
+            return 30.0  # データなし = 中立
+
+        score = 0.0
+
+        # 1. LP ロック状態（30点）
+        lp_locked_pct = safety.get("lp_locked_pct", 0)
+        if lp_locked_pct is not None and lp_locked_pct > 0:
+            if lp_locked_pct >= 90:
+                score += 30.0
+            elif lp_locked_pct >= 50:
+                score += 20.0
+            elif lp_locked_pct > 0:
+                score += 10.0
+        elif safety.get("lp_locked"):
+            score += 15.0  # 旧形式の互換
+        # LP未ロック = 0点
+
+        # 2. ミント権限（25点）
+        mint_auth = safety.get("mint_authority")
+        if mint_auth == "None":
+            score += 25.0  # 放棄済み = 最高
+        elif mint_auth is None:
+            score += 10.0  # 不明 = 中立
+        # 未放棄 = 0点
+
+        # 3. フリーズ権限（10点）
+        freeze_auth = safety.get("freeze_authority")
+        if freeze_auth == "None":
+            score += 10.0  # なし = 安全
+        elif freeze_auth is None:
+            score += 5.0   # 不明
+
+        # 4. Top Holders 集中度（25点）
+        top_pct = safety.get("top_holders_pct")
+        if top_pct is not None:
+            if top_pct < 20:
+                score += 25.0  # 分散型
+            elif top_pct < 30:
+                score += 20.0
+            elif top_pct < 50:
+                score += 10.0
+            # 50%以上 = 0点（集中リスク）
+
+        # 5. インサイダー検出（10点）
+        insider_count = safety.get("insider_count", 0)
+        if insider_count == 0:
+            score += 10.0
+        elif insider_count <= 2:
+            score += 5.0
+        # 3以上 = 0点
+
+        return min(100.0, score)
+
+    # ================================================================
+    # 信頼性コンボボーナス
+    # ================================================================
+    def _trust_combo_bonus(self, project: SolanaProject, safety: Optional[dict]) -> float:
+        """
+        複数の信頼性指標が揃っている場合のボーナス
+        「公式サイト + Twitter + LP locked + 低集中度」= 真面目なプロジェクト
+        """
+        bonus = 0.0
+        checks_passed = 0
+
+        # ソーシャル存在
+        if project.twitter_handle:
+            checks_passed += 1
+        if project.website_url:
+            checks_passed += 1
+        if project.discord_url:
+            checks_passed += 1
+
+        # 安全性
+        if safety:
+            if safety.get("lp_locked") or (safety.get("lp_locked_pct", 0) or 0) > 50:
+                checks_passed += 1
+            if safety.get("mint_authority") == "None":
+                checks_passed += 1
+            top_pct = safety.get("top_holders_pct")
+            if top_pct is not None and top_pct < 30:
+                checks_passed += 1
+
+        # コンボボーナス
+        if checks_passed >= 5:
+            bonus = 8.0   # 5/6以上 = 非常に信頼性が高い
+        elif checks_passed >= 4:
+            bonus = 5.0
+        elif checks_passed >= 3:
+            bonus = 3.0
+
+        return bonus
 
     # ================================================================
     # スコア関数
@@ -153,15 +276,15 @@ class Scorer:
         マイナス → 低評価
         """
         if change_24h >= 200:
-            return 30.0   # バブル警戒
+            return 30.0
         elif change_24h >= 100:
-            return 50.0   # 過熱気味
+            return 50.0
         elif change_24h >= 50:
             return 70.0
         elif change_24h >= 20:
             return 90.0
         elif change_24h >= 10:
-            return 100.0  # 最も健全な上昇
+            return 100.0
         elif change_24h >= 0:
             return 60.0 + change_24h * 4
         elif change_24h >= -20:
@@ -169,27 +292,24 @@ class Scorer:
         elif change_24h >= -50:
             return max(5, 20 + change_24h * 0.5)
         else:
-            return 0.0    # -50%超は評価ゼロ
+            return 0.0
 
     @staticmethod
     def _age_score(created_at: datetime) -> float:
         """
         ペア年齢スコア
         3〜12時間: 最高評価（初期の熱狂期、まだ早期参入可能）
-        1〜3時間: やや高い（超初期、リスク高め）
-        12〜24時間: 中程度（安定期に入りつつある）
-        24時間超: 低評価（もう初期ではない）
         """
         now = datetime.now(timezone.utc)
         age_hours = (now - created_at).total_seconds() / 3600
 
         if age_hours < 1:
-            return 40.0   # 超初期 — リスク高い
+            return 40.0
         elif age_hours < 3:
-            return 70.0   # 初期 — まだリスクあり
+            return 70.0
         elif age_hours < 12:
-            return 100.0  # ゴールデンタイム
+            return 100.0
         elif age_hours < 24:
-            return 60.0   # 安定期
+            return 60.0
         else:
-            return 30.0   # もう初期ではない
+            return 30.0

@@ -1,5 +1,5 @@
 """
-通知モジュール v5.7 — NFT通知 + アクションリンク + 優先度タグ版
+通知モジュール v5.8 — 信頼性チェック強化版
 
 ■ v5.6 改善点:
   - Jupiter スワップ直リンク（Phantom deeplink対応）
@@ -100,7 +100,7 @@ PRIORITY_URGENT = "🔴 緊急"    # TGE初動/NFTミント/大口移動/卒業
 PRIORITY_NORMAL = "🟡 通常"    # 定期スキャン/エアドロ
 PRIORITY_INFO   = "🟢 情報"    # 日次レポート/ステータス
 
-VERSION = "v5.7"
+VERSION = "v5.8"
 FOOTER_BASE = f"Sol Screener {VERSION}"
 
 
@@ -146,9 +146,9 @@ class Notifier:
                 f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
                 "**■ ランク:**\n"
                 "🟢 S/A (70+) | 🟡 B (40-69) | 🔴 C/D (<40) | 🟣 卒業\n\n"
-                "**■ スコア基準 (v5.5):**\n"
-                "流動性22% + 出来高22% + 価格変動15% + TX数15%\n"
-                "+ Makers10% + Web6% + Twitter5% + 監査3% + 年齢2%\n\n"
+                "**■ スコア基準 (v5.8):**\n"
+                "流動性18% + 出来高18% + 価格変動12% + TX数10%\n"
+                "+ Makers10% + ソーシャル信頼性15% + 安全性15% + 年齢2%\n\n"
                 "**■ フィルタ:**\n"
                 f"MC≥${config.min_mcap_usd/1000:.0f}K | "
                 f"Liq≥${config.min_liquidity_usd/1000:.0f}K | "
@@ -727,27 +727,80 @@ class Notifier:
             },
         ]
 
-        # 安全性フィールド
+        # ソーシャルリンクフィールド
+        social_lines = []
+        if project.twitter_handle:
+            social_lines.append(f"𝕏 [@{project.twitter_handle}](https://x.com/{project.twitter_handle})")
+        if project.website_url:
+            social_lines.append(f"🌐 [Website]({project.website_url})")
+        if project.discord_url:
+            social_lines.append(f"💬 [Discord]({project.discord_url})")
+        if project.telegram_url:
+            social_lines.append(f"✈️ [Telegram]({project.telegram_url})")
+        if not social_lines:
+            social_lines.append("❌ なし")
+
+        fields.append({
+            "name": "🔗 ソーシャル",
+            "value": "\n".join(social_lines),
+            "inline": True,
+        })
+
+        # 安全性フィールド（v5.8 強化）
         safety_lines = []
         if safety:
+            # RugCheck スコア
             if safety.get("rugcheck_score") is not None:
                 rc = safety["rugcheck_score"]
+                rc_norm = safety.get("rugcheck_normalized")
                 rc_label = "Good" if rc >= 800 else "OK" if rc >= 400 else "Risk"
-                safety_lines.append(f"RugCheck: `{rc}` ({rc_label})")
+                rc_str = f"RugCheck: `{rc}` ({rc_label})"
+                if rc_norm is not None:
+                    rc_str += f" [{rc_norm}/100]"
+                safety_lines.append(rc_str)
+
+            # LP Lock（%表示）
+            lp_pct = safety.get("lp_locked_pct")
+            if lp_pct is not None:
+                if lp_pct >= 90:
+                    safety_lines.append(f"LP: 🔒`{lp_pct:.0f}%`ロック")
+                elif lp_pct > 0:
+                    safety_lines.append(f"LP: ⚠️`{lp_pct:.0f}%`ロック")
+                else:
+                    safety_lines.append("LP: ❌未ロック")
+            elif safety.get("lp_locked") is not None:
+                lp_s = "🔒ロック" if safety["lp_locked"] else "❌未ロック"
+                safety_lines.append(f"LP: {lp_s}")
+
+            # Mint権限
             if safety.get("mint_authority"):
                 mint_s = "✅放棄" if safety["mint_authority"] == "None" else "❌未放棄"
                 safety_lines.append(f"Mint: {mint_s}")
-            if safety.get("lp_locked") is not None:
-                lp_s = "✅ロック" if safety["lp_locked"] else "❌未ロック"
-                safety_lines.append(f"LP: {lp_s}")
+
+            # Freeze権限
+            if safety.get("freeze_authority"):
+                frz_s = "✅なし" if safety["freeze_authority"] == "None" else "⚠️あり"
+                safety_lines.append(f"Freeze: {frz_s}")
+
+            # Top Holders 集中度
             if safety.get("top_holders_pct") is not None:
                 th = safety["top_holders_pct"]
-                th_label = "✅" if th < 30 else "⚠️" if th < 50 else "❌"
+                th_label = "✅分散" if th < 30 else "⚠️注意" if th < 50 else "❌集中"
                 safety_lines.append(f"Top10: `{th:.1f}%` {th_label}")
+
+            # インサイダー
+            insider = safety.get("insider_count", 0)
+            if insider > 0:
+                safety_lines.append(f"🕵️ Insider: `{insider}件`")
+
+            # ホルダー数
+            total_h = safety.get("total_holders")
+            if total_h:
+                safety_lines.append(f"👥 Holders: `{total_h:,}`")
 
         if safety_lines:
             fields.append({
-                "name": f"{risk_emoji} 安全性",
+                "name": f"{risk_emoji} 安全性チェック",
                 "value": "\n".join(safety_lines),
                 "inline": True,
             })
@@ -810,14 +863,32 @@ class Notifier:
             rc = safety["rugcheck_score"]
             rc_label = "Good" if rc >= 800 else "OK" if rc >= 400 else "Risk"
             lines.append(f"  RugCheck: `{rc}` ({rc_label})")
+
+        # LP Lock %
+        lp_pct = safety.get("lp_locked_pct")
+        if lp_pct is not None:
+            if lp_pct >= 90:
+                lines.append(f"  🔒 LP: `{lp_pct:.0f}%`ロック")
+            elif lp_pct > 0:
+                lines.append(f"  ⚠️ LP: `{lp_pct:.0f}%`ロック")
+            else:
+                lines.append("  ❌ LP: 未ロック")
+        elif safety.get("lp_locked") is not None:
+            lp_status = "✅ ロック済み" if safety["lp_locked"] else "❌ 未ロック"
+            lines.append(f"  🔒 LP: {lp_status}")
+
         if safety.get("top_holders_pct") is not None:
             lines.append(f"  👥 Top10ホルダー: `{safety['top_holders_pct']:.1f}%`")
+        if safety.get("insider_count", 0) > 0:
+            lines.append(f"  🕵️ インサイダー: `{safety['insider_count']}件`")
         if safety.get("mint_authority"):
             mint_status = "✅ 放棄済み" if safety["mint_authority"] == "None" else "❌ 未放棄"
             lines.append(f"  🔑 ミント権限: {mint_status}")
-        if safety.get("lp_locked") is not None:
-            lp_status = "✅ ロック済み" if safety["lp_locked"] else "❌ 未ロック"
-            lines.append(f"  🔒 LP: {lp_status}")
+        if safety.get("freeze_authority"):
+            frz_status = "✅ なし" if safety["freeze_authority"] == "None" else "⚠️ あり"
+            lines.append(f"  🧊 フリーズ権限: {frz_status}")
+        if safety.get("total_holders"):
+            lines.append(f"  👥 総ホルダー数: `{safety['total_holders']:,}`")
 
     @staticmethod
     def _risk_emoji(safety: Optional[dict]) -> str:
