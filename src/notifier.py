@@ -1,5 +1,5 @@
 """
-通知モジュール v5.2 — Discord Embed UX 全面改善版
+通知モジュール v5.4 — Discord Embed UX 全面改善版
 
 ■ 色分けルール（Embed左のバー色）:
   🟢 緑 (0x00FF88) = スコア70以上 / 安全 / 高確度エアドロ
@@ -9,15 +9,15 @@
   🟠 金 (0xF1C40F) = スマートマネー検知
   🔵 青 (0x5865F2) = 情報通知 / 起動 / 日次レポート
   ⚪ グレー (0x95A5A6) = 低確度エアドロ
+  🔥 オレンジ (0xFF6B35) = Meme急騰
+  🚀 シアン (0x00D4AA) = TGE新規ローンチ
 
-■ 通知種別（タイトルで区別）:
-  🔍 定期スキャン結果     — 1時間ごとのフルスキャン
-  ⚡ リアルタイム検知      — 5分ごとの急騰/TGE/卒業
-  🎓 Pump.fun 卒業        — Raydium上場の瞬間
-  ⚠️ 危険トークン         — ラグプル疑い
-  🧠 Smart Money          — 大口ウォレットの動き
-  ✈️ エアドロップ情報     — 1日2回のエアドロ
-  📊 日次レポート         — 毎朝のまとめ
+■ v5.4 改善点:
+  - send_tge_alert(): TGE検知をEmbed形式で通知（テキスト→Embed）
+  - send_meme_alert(): Meme急騰をEmbed形式で通知（テキスト→Embed）
+  - _fmt_usd(): $0表示をN/Aに、K/M単位で見やすく
+  - スコア基準・フィルタ基準をfooterに表示
+  - 全通知にバージョン番号統一 (v5.4)
 """
 import asyncio
 import logging
@@ -68,6 +68,21 @@ def _score_bar(score: float) -> str:
     return "█" * filled + "░" * empty
 
 
+def _fmt_usd(value: float) -> str:
+    """USD金額をフォーマット（0の場合はN/A）"""
+    if value <= 0:
+        return "N/A"
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"${value / 1_000:.1f}K"
+    return f"${value:,.0f}"
+
+
+VERSION = "v5.4"
+FOOTER_BASE = f"Sol Screener {VERSION}"
+
+
 class Notifier:
     """Discord Webhook 通知（Embed 形式・UX改善版）"""
 
@@ -79,6 +94,8 @@ class Notifier:
     COLOR_PURPLE = 0x9B59B6   # Pump.fun 卒業
     COLOR_GOLD   = 0xF1C40F   # スマートマネー
     COLOR_GREY   = 0x95A5A6   # 低確度
+    COLOR_ORANGE = 0xFF6B35   # Meme急騰
+    COLOR_CYAN   = 0x00D4AA   # TGE新規ローンチ
 
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
@@ -103,7 +120,6 @@ class Notifier:
             await self._send_simple(f"{title}\n\n対象トークンなし")
             return
 
-        # ── 凡例（初回のみ） ──
         legend_embed = {
             "title": title,
             "description": (
@@ -116,22 +132,23 @@ class Notifier:
                 "🟣 紫 = Pump.fun卒業トークン\n\n"
                 "**■ スコア基準:**\n"
                 "流動性(15%) + 出来高(15%) + 価格変動(10%) + TX数(10%) + "
-                "ソーシャル(35%) + 開発(10%) + 安全性ボーナス + 卒業ボーナス + SM"
+                "ソーシャル(35%) + 開発(10%) + 安全性ボーナス + 卒業ボーナス + SM\n\n"
+                "**■ フィルタ基準:**\n"
+                f"最低流動性: ${config.min_liquidity_usd:,.0f} | "
+                f"最低出来高: ${config.min_volume_24h_usd:,.0f}"
             ),
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v5.2 | DexScreener + RugCheck + BirdEye"},
+            "footer": {"text": f"{FOOTER_BASE} | DexScreener + RugCheck + BirdEye"},
         }
 
         embeds = [legend_embed]
 
-        # ── 各プロジェクトの Embed ──
-        for p in projects[:9]:  # 凡例 + 9件 = 10 embeds
+        for p in projects[:9]:
             safety = (safety_results or {}).get(p.token_address, {})
             sm = (smart_money_results or {}).get(p.token_address, {})
             embed = self._build_project_embed(p, safety, sm)
             embeds.append(embed)
 
-        # Discord は 1 メッセージ 10 embeds まで → 分割送信
         for i in range(0, len(embeds), 10):
             chunk = embeds[i:i + 10]
             await self._send_webhook({"embeds": chunk})
@@ -164,13 +181,12 @@ class Notifier:
             f"**{project.name}** (`{project.symbol}`) が Raydium に上場しました！",
             "",
             f"💰 価格: `${project.price_usd:.8f}`",
-            f"💧 流動性: `${project.liquidity_usd:,.0f}`",
-            f"📊 時価総額: `${project.market_cap:,.0f}`",
+            f"💧 流動性: `{_fmt_usd(project.liquidity_usd)}`",
+            f"📊 時価総額: `{_fmt_usd(project.market_cap)}`",
             f"📈 5m: `{project.price_change_5m:+.1f}%` | 1h: `{project.price_change_1h:+.1f}%`",
             "",
         ]
 
-        # 安全性情報
         if safety:
             desc_lines.append(f"**🛡️ 安全性チェック** {risk_emoji}")
             self._append_safety_lines(desc_lines, safety)
@@ -187,7 +203,7 @@ class Notifier:
                 "text": (
                     f"Rank: {_rank_label(project.total_score)} | "
                     f"Score: {project.total_score:.1f}/100 | "
-                    f"DEX: {project.dex}"
+                    f"DEX: {project.dex} | {FOOTER_BASE}"
                 )
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -228,7 +244,7 @@ class Notifier:
             "title": f"⚠️ 危険トークン: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_RED,
-            "footer": {"text": "Sol Screener v5.2 | このトークンは自動除外されました"},
+            "footer": {"text": f"{FOOTER_BASE} | このトークンは自動除外されました"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -277,21 +293,171 @@ class Notifier:
             "title": f"🧠 Smart Money 検知: {project.symbol}",
             "description": "\n".join(desc_lines),
             "color": self.COLOR_GOLD,
-            "footer": {"text": "Sol Screener v5.2 | Smart Money Tracker"},
+            "footer": {"text": f"{FOOTER_BASE} | Smart Money Tracker"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 5. エアドロップ通知（マルチチェーン対応）
+    # 5. TGE（新規ローンチ）通知 — Embed形式 ★NEW v5.4
+    # ================================================================
+    async def send_tge_alert(self, event):
+        """TGE（Token Generation Event）をリッチEmbed形式で通知"""
+        if not self.webhook_url:
+            return
+
+        addr = event.token_address
+        links = (
+            f"[DexScreener]({_dexscreener_url(addr)}) | "
+            f"[RugCheck]({_rugcheck_url(addr)}) | "
+            f"[BirdEye]({_birdeye_url(addr)})"
+        )
+
+        display_name = event.name or "New Token"
+        display_symbol = event.symbol or addr[:8] + "..."
+
+        desc_lines = [
+            f"**{display_name}** (`{display_symbol}`) が新規ローンチされました",
+            "",
+        ]
+
+        fields = []
+        fields.append({
+            "name": "📊 時価総額",
+            "value": f"`{_fmt_usd(event.initial_mcap)}`",
+            "inline": True,
+        })
+        fields.append({
+            "name": "💧 流動性",
+            "value": f"`{_fmt_usd(event.initial_liquidity)}`",
+            "inline": True,
+        })
+        fields.append({
+            "name": "🏷️ プラットフォーム",
+            "value": f"`{event.platform or 'unknown'}`",
+            "inline": True,
+        })
+        fields.append({
+            "name": "📡 ソース",
+            "value": f"`{event.source or 'dexscreener'}`",
+            "inline": True,
+        })
+        fields.append({
+            "name": "🔗 リンク",
+            "value": links,
+            "inline": False,
+        })
+
+        embed = {
+            "title": f"🚀 新規ローンチ: {display_symbol}",
+            "description": "\n".join(desc_lines),
+            "color": self.COLOR_CYAN,
+            "fields": fields,
+            "thumbnail": {"url": f"https://dd.dexscreener.com/ds-data/tokens/solana/{addr}.png"},
+            "footer": {
+                "text": (
+                    f"MC: {_fmt_usd(event.initial_mcap)} | "
+                    f"Liq: {_fmt_usd(event.initial_liquidity)} | "
+                    f"{FOOTER_BASE}"
+                )
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        await self._send_webhook({"embeds": [embed]})
+
+    # ================================================================
+    # 6. Meme急騰通知 — Embed形式 ★NEW v5.4
+    # ================================================================
+    async def send_meme_alert(self, alert):
+        """Meme急騰をリッチEmbed形式で通知"""
+        if not self.webhook_url:
+            return
+
+        addr = alert.token_address
+        links = (
+            f"[DexScreener]({_dexscreener_url(addr)}) | "
+            f"[RugCheck]({_rugcheck_url(addr)}) | "
+            f"[BirdEye]({_birdeye_url(addr)})"
+        )
+
+        type_labels = {
+            "5m_pump": "⚡ 5分急騰",
+            "1h_pump": "📈 1時間急騰",
+            "volume_surge": "🔊 出来高急増",
+        }
+        alert_label = type_labels.get(alert.alert_type, "🔥 急騰")
+
+        desc_lines = [
+            f"**{alert.name}** (`{alert.symbol}`) が急騰中！",
+            f"検知タイプ: **{alert_label}**",
+            "",
+        ]
+
+        fields = []
+        fields.append({
+            "name": "📈 価格変動",
+            "value": (
+                f"5m: `{alert.price_change_5m:+.1f}%`\n"
+                f"1h: `{alert.price_change_1h:+.1f}%`\n"
+                f"24h: `{alert.price_change_24h:+.1f}%`"
+            ),
+            "inline": True,
+        })
+        fields.append({
+            "name": "💧 流動性",
+            "value": f"`{_fmt_usd(alert.liquidity_usd)}`",
+            "inline": True,
+        })
+
+        if alert.volume_surge > 0:
+            fields.append({
+                "name": "🔊 出来高サージ",
+                "value": f"`{alert.volume_surge:+.0f}%`",
+                "inline": True,
+            })
+
+        fields.append({
+            "name": "🔗 リンク",
+            "value": links,
+            "inline": False,
+        })
+
+        if alert.price_change_5m >= 50 or alert.price_change_1h >= 100:
+            color = self.COLOR_RED
+        elif alert.price_change_5m >= 20 or alert.price_change_1h >= 50:
+            color = self.COLOR_ORANGE
+        else:
+            color = self.COLOR_YELLOW
+
+        embed = {
+            "title": f"🔥 Meme急騰: {alert.symbol} ({alert_label})",
+            "description": "\n".join(desc_lines),
+            "color": color,
+            "fields": fields,
+            "thumbnail": {"url": f"https://dd.dexscreener.com/ds-data/tokens/solana/{addr}.png"},
+            "footer": {
+                "text": (
+                    f"5m: {alert.price_change_5m:+.1f}% | "
+                    f"1h: {alert.price_change_1h:+.1f}% | "
+                    f"Liq: {_fmt_usd(alert.liquidity_usd)} | "
+                    f"{FOOTER_BASE}"
+                )
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        await self._send_webhook({"embeds": [embed]})
+
+    # ================================================================
+    # 7. エアドロップ通知（マルチチェーン対応）
     # ================================================================
     async def send_airdrop_report(self, airdrops: list, title: str = "✈️ エアドロップ情報"):
         """エアドロップ情報を Discord Embed で通知（マルチチェーン対応）"""
         if not self.webhook_url or not airdrops:
             return
 
-        # チェーン別・カテゴリ別に集計
         by_chain = {}
         by_cat = {}
         for a in airdrops:
@@ -306,10 +472,9 @@ class Notifier:
         chain_emoji = {
             "solana": "◎", "ethereum": "⟠", "arbitrum": "🔵",
             "base": "🔷", "berachain": "🐻", "monad": "🟣",
-            "scroll": "📜", "linea": "🌐", "blast": "💥", "multi": "🌍",
+            "multi": "🌐", "sui": "💧", "aptos": "🅰️",
         }
 
-        # 上位チェーン5つ
         top_chains = sorted(by_chain.items(), key=lambda x: -len(x[1]))[:5]
         chain_lines = [
             f"{chain_emoji.get(c, '🔗')} **{c.upper()}**: {len(items)}件"
@@ -320,7 +485,6 @@ class Notifier:
             for c, items in sorted(by_cat.items(), key=lambda x: -len(x[1]))
         ]
 
-        # サマリー Embed
         summary = {
             "title": title,
             "description": (
@@ -337,13 +501,12 @@ class Notifier:
                 f"**カテゴリ別:**\n" + "\n".join(cat_lines)
             ),
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v5.2 | Multi-Chain Airdrop Scanner"},
+            "footer": {"text": f"{FOOTER_BASE} | Multi-Chain Airdrop Scanner"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         embeds = [summary]
 
-        # 上位エアドロを個別 Embed で通知（最大9件）
         for a in airdrops[:9]:
             conf_bar = _score_bar(a.confidence)
             emoji = cat_emoji.get(a.category, "📦")
@@ -367,7 +530,6 @@ class Notifier:
             if a.url:
                 desc_lines.append(f"\n🔗 [プロジェクトサイト]({a.url})")
 
-            # 色: 確度に応じて
             if a.confidence >= 75:
                 color = self.COLOR_GREEN
             elif a.confidence >= 50:
@@ -383,7 +545,6 @@ class Notifier:
             }
             embeds.append(embed)
 
-        # 分割送信
         for i in range(0, len(embeds), 10):
             chunk = embeds[i:i + 10]
             await self._send_webhook({"embeds": chunk})
@@ -391,7 +552,7 @@ class Notifier:
                 await asyncio.sleep(1)
 
     # ================================================================
-    # 6. 日次レポート（青色）
+    # 8. 日次レポート（青色）
     # ================================================================
     async def send_daily_report(self, report_text: str):
         """日次レポートを送信"""
@@ -399,13 +560,13 @@ class Notifier:
             "title": "📊 日次レポート",
             "description": report_text[:4000],
             "color": self.COLOR_BLUE,
-            "footer": {"text": "Sol Screener v5.2 | Daily Report"},
+            "footer": {"text": f"{FOOTER_BASE} | Daily Report"},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         await self._send_webhook({"embeds": [embed]})
 
     # ================================================================
-    # 7. 汎用テキスト通知（青色）
+    # 9. 汎用テキスト通知（青色）
     # ================================================================
     async def send_text(self, text: str, title: str = "ℹ️ 通知"):
         """シンプルなテキスト通知"""
@@ -440,7 +601,6 @@ class Notifier:
             f"[Solscan]({_solscan_url(addr)})"
         )
 
-        # フィールド
         fields = [
             {
                 "name": "💰 価格",
@@ -449,12 +609,12 @@ class Notifier:
             },
             {
                 "name": "💧 流動性",
-                "value": f"`${project.liquidity_usd:,.0f}`",
+                "value": f"`{_fmt_usd(project.liquidity_usd)}`",
                 "inline": True,
             },
             {
                 "name": "📊 時価総額",
-                "value": f"`${project.market_cap:,.0f}`",
+                "value": f"`{_fmt_usd(project.market_cap)}`",
                 "inline": True,
             },
             {
@@ -468,12 +628,11 @@ class Notifier:
             },
             {
                 "name": "🔄 24h取引",
-                "value": f"Vol: `${project.volume_24h_usd:,.0f}`\nTx: `{project.tx_count_24h:,}`",
+                "value": f"Vol: `{_fmt_usd(project.volume_24h_usd)}`\nTx: `{project.tx_count_24h:,}`",
                 "inline": True,
             },
         ]
 
-        # 安全性フィールド
         safety_lines = []
         if safety:
             if safety.get("rugcheck_score") is not None:
@@ -498,7 +657,6 @@ class Notifier:
                 "inline": True,
             })
 
-        # スマートマネーフィールド
         if smart_money and smart_money.get("smart_money_score", 0) > 0:
             sm_score = smart_money["smart_money_score"]
             whale_count = smart_money.get("whale_count", 0)
@@ -508,14 +666,12 @@ class Notifier:
                 "inline": True,
             })
 
-        # リンクフィールド
         fields.append({
             "name": "🔗 リンク",
             "value": links,
             "inline": False,
         })
 
-        # カラー決定
         if project.is_graduated:
             color = self.COLOR_PURPLE
         elif project.total_score >= 70:
@@ -532,6 +688,13 @@ class Notifier:
             "fields": fields,
             "thumbnail": {
                 "url": f"https://dd.dexscreener.com/ds-data/tokens/solana/{addr}.png"
+            },
+            "footer": {
+                "text": (
+                    f"MC: {_fmt_usd(project.market_cap)} | "
+                    f"Liq: {_fmt_usd(project.liquidity_usd)} | "
+                    f"{FOOTER_BASE}"
+                )
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -590,5 +753,3 @@ class Notifier:
         if not self.webhook_url:
             return
         await self._send_webhook({"content": text[:2000]})
-"""
-"""

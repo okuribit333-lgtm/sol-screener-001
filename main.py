@@ -1,6 +1,13 @@
 """
-Solana Auto Screener v5.3 — 完全統合版 main.py
+Solana Auto Screener v5.4 — 品質改善版 main.py
 Railway Worker モードで動作
+
+■ v5.4 改善点:
+  - TGE/Meme通知: テキスト → Embed形式（send_tge_alert / send_meme_alert）
+  - 品質フィルタ: MC<$10K / Liq<$5K のトークンを除外
+  - 重複排除: StateManager 24時間TTL + 正規化キー
+  - フルスキャン: TOP_N デフォルト10件に増加
+  - エアドロ: 正規化キーで重複排除の精度向上
 
 ■ 通知種別（Discordで色分け表示）:
   🔍 定期スキャン結果     — 1時間ごと（緑/黄/赤で色分け）
@@ -8,15 +15,10 @@ Railway Worker モードで動作
   🎓 Pump.fun 卒業        — Raydium上場の瞬間（紫色）
   ⚠️ 危険トークン         — ラグプル疑い（赤色）
   🧠 Smart Money          — 大口ウォレットの動き（金色）
+  🚀 TGE新規ローンチ      — Embed形式（シアン色）★NEW
+  🔥 Meme急騰             — Embed形式（オレンジ色）★NEW
   ✈️ エアドロップ情報     — 1日2回 9時/21時 JST（緑/黄/グレー）
   📊 日次レポート         — 毎朝のまとめ（青色）
-
-■ 重複排除:
-  全ての通知はStateManagerで管理。同じトークン/イベントは再通知しない。
-  フルスキャン: token_address で管理
-  卒業検知: grad_{token_address} で管理
-  Meme急騰: meme_{token_address} で管理
-  TGE検知: tge_{token_address} で管理
 """
 import asyncio
 import logging
@@ -34,7 +36,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 
-# Railway ではファイルシステムが揮発性のため、FileHandler はオプション
 if os.getenv("ENABLE_FILE_LOG", "false").lower() == "true":
     try:
         os.makedirs("logs", exist_ok=True)
@@ -70,6 +71,10 @@ from src.market_events import (
     MemeChartMonitor,
 )
 from src.airdrop import AirdropScanner
+
+# ── 品質フィルタ閾値 ──
+MIN_MCAP_FOR_NOTIFICATION = 10_000       # MC $10K 未満は除外
+MIN_LIQUIDITY_FOR_NOTIFICATION = 5_000   # Liq $5K 未満は除外
 
 # ── グローバル変数 ──
 session: aiohttp.ClientSession = None
@@ -117,14 +122,19 @@ async def init():
     meme_monitor = MemeChartMonitor(session)
     airdrop_scanner = AirdropScanner(session)
 
-    logger.info("✅ 全モジュール初期化完了（v5.2）")
+    logger.info("✅ 全モジュール初期化完了（v5.4）")
+
+
+def _passes_quality_filter(mcap: float, liquidity: float) -> bool:
+    """品質フィルタ: MC/Liqが最低基準を満たすか"""
+    return mcap >= MIN_MCAP_FOR_NOTIFICATION and liquidity >= MIN_LIQUIDITY_FOR_NOTIFICATION
 
 
 # ============================================================
 # リアルタイム監視（5分間隔）
 # ============================================================
 async def run_realtime_monitor():
-    """リアルタイム監視サイクル（重複排除付き）"""
+    """リアルタイム監視サイクル（重複排除 + 品質フィルタ付き）"""
     logger.info("⚡ リアルタイム監視サイクル開始...")
 
     try:
@@ -137,7 +147,6 @@ async def run_realtime_monitor():
                     if state.is_notified(state_key):
                         continue
 
-                    # 安全性チェック
                     from src.scanner import SolanaProject
                     dummy_project = SolanaProject(
                         token_address=grad.token_address,
@@ -153,16 +162,23 @@ async def run_realtime_monitor():
                         graduation_source=grad.dex,
                     )
 
+                    # 品質フィルタ
+                    if not _passes_quality_filter(grad.initial_mcap, grad.initial_liquidity):
+                        logger.debug(
+                            f"  品質フィルタ除外(卒業): {grad.token_symbol} "
+                            f"MC=${grad.initial_mcap:,.0f} Liq=${grad.initial_liquidity:,.0f}"
+                        )
+                        state.mark_notified(state_key, grad.token_symbol)
+                        continue
+
                     safety = await safety_checker.check(dummy_project)
 
-                    # danger レベルは自動除外
                     if config.danger_auto_exclude and safety.get("risk_level") == "danger":
                         logger.info(f"  🚫 危険トークン除外: {grad.token_symbol}")
                         await notifier.send_danger_alert(dummy_project, safety)
                         state.mark_notified(state_key, grad.token_symbol)
                         continue
 
-                    # スコアリング
                     sm = {}
                     if config.enable_smart_money:
                         sm = await mania_scorer.check_smart_money(grad.token_address)
@@ -201,7 +217,6 @@ async def run_realtime_monitor():
         try:
             liq_alerts = await liquidity_monitor.check_all()
             for alert in liq_alerts:
-                # 流動性は毎回通知OK（変動があるたびに通知）
                 emoji = "📈" if alert["change_pct"] > 0 else "📉"
                 await notifier.send_text(
                     f"{emoji} **{alert['symbol']}** の流動性が{alert['direction']}\n"
@@ -223,7 +238,7 @@ async def run_realtime_monitor():
         except Exception as e:
             logger.debug(f"SOLレンジ監視エラー: {e}")
 
-        # ── 5. Meme チャート急騰（重複排除付き） ──
+        # ── 5. Meme チャート急騰（Embed形式 + 品質フィルタ） ──
         try:
             meme_alerts = await meme_monitor.scan_hot_memes()
             sent_count = 0
@@ -233,20 +248,24 @@ async def run_realtime_monitor():
                 meme_key = f"meme_{alert.token_address}"
                 if state.is_notified(meme_key):
                     continue
-                await notifier.send_text(
-                    f"**{alert.name}** (`{alert.symbol}`)\n"
-                    f"5m: `{alert.price_change_5m:+.1f}%` | "
-                    f"1h: `{alert.price_change_1h:+.1f}%` | "
-                    f"Vol Surge: `{alert.volume_surge:.0f}%`\n"
-                    f"[DexScreener](https://dexscreener.com/solana/{alert.token_address})",
-                    title=f"🔥 Meme急騰: {alert.symbol}",
-                )
+
+                # 品質フィルタ: 流動性チェック
+                if alert.liquidity_usd < MIN_LIQUIDITY_FOR_NOTIFICATION:
+                    logger.debug(
+                        f"  品質フィルタ除外(Meme): {alert.symbol} "
+                        f"Liq=${alert.liquidity_usd:,.0f}"
+                    )
+                    state.mark_notified(meme_key, alert.symbol)
+                    continue
+
+                # ★ Embed形式で通知（v5.4: テキスト→Embed）
+                await notifier.send_meme_alert(alert)
                 state.mark_notified(meme_key, alert.symbol)
                 sent_count += 1
         except Exception as e:
             logger.debug(f"Meme監視エラー: {e}")
 
-        # ── 6. TGE 検知（重複排除付き） ──
+        # ── 6. TGE 検知（Embed形式 + 品質フィルタ） ──
         try:
             tge_events = await tge_monitor.check_new_launches()
             sent_count = 0
@@ -256,13 +275,18 @@ async def run_realtime_monitor():
                 tge_key = f"tge_{event.token_address}"
                 if state.is_notified(tge_key):
                     continue
-                await notifier.send_text(
-                    f"**{event.name}** (`{event.symbol}`)\n"
-                    f"Platform: `{event.platform}`\n"
-                    f"MC: `${event.initial_mcap:,.0f}` | Liq: `${event.initial_liquidity:,.0f}`\n"
-                    f"[DexScreener](https://dexscreener.com/solana/{event.token_address})",
-                    title=f"🚀 新規ローンチ: {event.symbol or event.name}",
-                )
+
+                # 品質フィルタ: MC/Liqチェック
+                if not _passes_quality_filter(event.initial_mcap, event.initial_liquidity):
+                    logger.debug(
+                        f"  品質フィルタ除外(TGE): {event.symbol or event.name} "
+                        f"MC=${event.initial_mcap:,.0f} Liq=${event.initial_liquidity:,.0f}"
+                    )
+                    state.mark_notified(tge_key, event.symbol or event.name)
+                    continue
+
+                # ★ Embed形式で通知（v5.4: テキスト→Embed）
+                await notifier.send_tge_alert(event)
                 state.mark_notified(tge_key, event.symbol or event.name)
                 sent_count += 1
         except Exception as e:
@@ -290,17 +314,31 @@ async def run_full_scan():
 
         logger.info(f"発見: {len(projects)}件")
 
+        # ── 1.5 品質フィルタ（v5.4追加）──
+        quality_filtered = [
+            p for p in projects
+            if _passes_quality_filter(p.market_cap, p.liquidity_usd)
+        ]
+        if len(quality_filtered) < len(projects):
+            logger.info(
+                f"品質フィルタ: {len(projects)}件 → {len(quality_filtered)}件 "
+                f"(MC<${MIN_MCAP_FOR_NOTIFICATION:,.0f} / Liq<${MIN_LIQUIDITY_FOR_NOTIFICATION:,.0f} を除外)"
+            )
+        projects = quality_filtered
+
+        if not projects:
+            logger.info("品質フィルタ後: 0件")
+            return
+
         # ── 2. 安全性チェック ──
         safety_results = await safety_checker.check_multiple(projects)
 
-        # danger 除外
         if config.danger_auto_exclude:
             safe_projects = []
             for p in projects:
                 s = safety_results.get(p.token_address, {})
                 if s.get("risk_level") == "danger":
                     logger.info(f"  🚫 除外: {p.symbol} (danger)")
-                    # danger通知も重複排除
                     danger_key = f"danger_{p.token_address}"
                     if not state.is_notified(danger_key):
                         await notifier.send_danger_alert(p, s)
@@ -333,6 +371,8 @@ async def run_full_scan():
         if not top:
             logger.info("新規通知対象なし（全て通知済み）")
             return
+
+        logger.info(f"🔍 フルスキャン通知: {len(top)}件 (TOP {config.top_n})")
 
         # ── 6. 通知 ──
         await notifier.send_scan_results(
@@ -371,7 +411,6 @@ async def run_airdrop_scan():
     logger.info("✈️ エアドロップスキャン開始...")
 
     try:
-        # 全ソースからスキャン
         all_airdrops = await airdrop_scanner.scan_all()
 
         if not all_airdrops:
@@ -385,13 +424,14 @@ async def run_airdrop_scan():
             logger.info(f"エアドロ検出 {len(all_airdrops)}件、確度40%以上: 0件 → 通知スキップ")
             return
 
-        # 前回通知済みを除外（24時間以内に通知したものはスキップ）
+        # 前回通知済みを除外（正規化キーで精度向上 v5.4）
         fresh = []
         for a in high_conf:
-            airdrop_key = f"airdrop_{a.name.lower().replace(' ', '_')}"
+            # 正規化キー: 名前の揺れを吸収
+            airdrop_key = f"airdrop_{StateManager.normalize_key(a.name)}"
             if not state.is_notified(airdrop_key):
                 fresh.append(a)
-        
+
         if not fresh:
             logger.info(f"エアドロ {len(high_conf)}件全て通知済み → 新規なし、スキップ")
             return
@@ -399,16 +439,15 @@ async def run_airdrop_scan():
         # BCG/ゲーム枠を確保（最低5枠）
         gamefi = [a for a in fresh if a.category in ('gamefi', 'bcg', 'gaming', 'nft')]
         others = [a for a in fresh if a.category not in ('gamefi', 'bcg', 'gaming', 'nft')]
-        
-        # ゲーム枠5 + その他15 = 合計20件（足りなければ埋め合わせ）
+
         game_top = airdrop_scanner.get_top(gamefi, n=5) if gamefi else []
         other_top = airdrop_scanner.get_top(others, n=20 - len(game_top))
         top_airdrops = game_top + other_top
 
-        # 通知済みとして記録
+        # 通知済みとして記録（正規化キー）
         for a in top_airdrops:
-            airdrop_key = f"airdrop_{a.name.lower().replace(' ', '_')}"
-            state.mark_notified(airdrop_key)
+            airdrop_key = f"airdrop_{StateManager.normalize_key(a.name)}"
+            state.mark_notified(airdrop_key, a.name)
 
         logger.info(
             f"✈️ エアドロ通知: {len(top_airdrops)}件 "
@@ -416,14 +455,12 @@ async def run_airdrop_scan():
             f"BCG枠: {len(game_top)}件 + 他: {len(other_top)}件)"
         )
 
-        # Discord に通知
         now_jst = datetime.now(timezone.utc).strftime("%H:%M UTC")
         await notifier.send_airdrop_report(
             top_airdrops,
             title=f"✈️ エアドロップ情報 ({now_jst})",
         )
 
-        # カテゴリ別サマリーをログに出力
         by_cat = {}
         for a in top_airdrops:
             by_cat.setdefault(a.category or "other", []).append(a)
@@ -451,9 +488,14 @@ async def run_daily_report():
             "",
         ]
 
-        # フルスキャンを実行
         projects = await scanner.fetch_new_pairs(hours_back=24)
         if projects:
+            # 品質フィルタ適用
+            projects = [
+                p for p in projects
+                if _passes_quality_filter(p.market_cap, p.liquidity_usd)
+            ]
+
             safety_results = await safety_checker.check_multiple(projects[:10])
             for p in projects[:10]:
                 safety = safety_results.get(p.token_address, {})
@@ -474,7 +516,6 @@ async def run_daily_report():
                     f"Risk: {risk}"
                 )
 
-            # 卒業トークン
             graduated = [p for p in projects if p.is_graduated]
             if graduated:
                 lines.append("")
@@ -497,10 +538,9 @@ async def run_daily_report():
 async def main():
     """エントリーポイント"""
     logger.info("=" * 60)
-    logger.info("🚀 Solana Auto Screener v5.3 起動")
+    logger.info("🚀 Solana Auto Screener v5.4 起動")
     logger.info("=" * 60)
 
-    # 設定確認
     if not config.discord_webhook_url:
         logger.warning("⚠️ DISCORD_WEBHOOK_URL が未設定です")
 
@@ -510,27 +550,36 @@ async def main():
     logger.info(f"  エアドロスキャン: 9時/21時 JST")
     logger.info(f"  Pump.fun検知: {'ON' if config.enable_pumpfun else 'OFF'}")
     logger.info(f"  スマートマネー: {'ON' if config.enable_smart_money else 'OFF'}")
+    logger.info(f"  品質フィルタ: MC>=${MIN_MCAP_FOR_NOTIFICATION:,.0f} / Liq>=${MIN_LIQUIDITY_FOR_NOTIFICATION:,.0f}")
+    logger.info(f"  TOP_N: {config.top_n}")
 
     await init()
 
     # 起動通知
     try:
         await notifier.send_text(
-            "**Solana Auto Screener v5.3** が起動しました\n\n"
+            "**Solana Auto Screener v5.4** が起動しました\n\n"
             f"⚡ リアルタイム: {config.realtime_interval}分間隔\n"
-            f"🔍 フルスキャン: {config.scan_interval_minutes}分間隔\n"
+            f"🔍 フルスキャン: {config.scan_interval_minutes}分間隔 (Top {config.top_n})\n"
             f"✈️ エアドロスキャン: 9時/21時 JST\n"
             f"🎓 Pump.fun検知: {'ON' if config.enable_pumpfun else 'OFF'}\n"
             f"🧠 スマートマネー: {'ON' if config.enable_smart_money else 'OFF'}\n"
             f"🛡️ 危険自動除外: {'ON' if config.danger_auto_exclude else 'OFF'}\n\n"
+            "**■ v5.4 改善点:**\n"
+            "🚀 TGE/Meme通知がEmbed形式に\n"
+            f"🔍 品質フィルタ: MC≥${MIN_MCAP_FOR_NOTIFICATION/1000:.0f}K / Liq≥${MIN_LIQUIDITY_FOR_NOTIFICATION/1000:.0f}K\n"
+            "🔄 24時間TTL付き重複排除\n"
+            "📊 フルスキャン結果数増加\n\n"
             "**■ 通知の見方:**\n"
             "🟢 緑 = 高スコア/高確度\n"
             "🟡 黄 = 中スコア/中確度\n"
             "🔴 赤 = 危険/低スコア\n"
             "🟣 紫 = Pump.fun卒業\n"
             "🟠 金 = Smart Money\n"
+            "🔥 オレンジ = Meme急騰\n"
+            "🚀 シアン = TGE新規ローンチ\n"
             "🔵 青 = レポート/情報",
-            title="🚀 Bot 起動 v5.2",
+            title="🚀 Bot 起動 v5.4",
         )
     except Exception as e:
         logger.warning(f"起動通知エラー: {e}")
@@ -538,7 +587,6 @@ async def main():
     # スケジューラ設定
     scheduler = AsyncIOScheduler(timezone="Asia/Tokyo")
 
-    # リアルタイム監視
     scheduler.add_job(
         run_realtime_monitor,
         IntervalTrigger(minutes=config.realtime_interval),
@@ -548,7 +596,6 @@ async def main():
         misfire_grace_time=60,
     )
 
-    # フルスキャン
     scheduler.add_job(
         run_full_scan,
         IntervalTrigger(minutes=config.scan_interval_minutes),
@@ -558,7 +605,6 @@ async def main():
         misfire_grace_time=120,
     )
 
-    # エアドロップスキャン（1日2回: 9時と21時 JST）
     scheduler.add_job(
         run_airdrop_scan,
         CronTrigger(hour="9,21", minute=0),
@@ -568,7 +614,6 @@ async def main():
         misfire_grace_time=300,
     )
 
-    # 日次レポート
     scheduler.add_job(
         run_daily_report,
         CronTrigger(hour=config.daily_report_hour, minute=0),
@@ -585,7 +630,6 @@ async def main():
     await run_realtime_monitor()
     await run_full_scan()
 
-    # 初回エアドロスキャンも実行
     logger.info("🔄 初回エアドロスキャン実行中...")
     await run_airdrop_scan()
 

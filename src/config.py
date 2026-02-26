@@ -42,11 +42,11 @@ class Config:
     watch_nfts: str = os.getenv("WATCH_NFTS", "")
 
     # ── スクリーニング設定 ──
-    top_n: int = int(os.getenv("TOP_N", "5"))
+    top_n: int = int(os.getenv("TOP_N", "10"))
     scan_interval_minutes: int = int(os.getenv("SCAN_INTERVAL_MINUTES", "60"))
     morning_scan_hour: int = int(os.getenv("MORNING_SCAN_HOUR", "7"))
-    min_liquidity_usd: float = float(os.getenv("MIN_LIQUIDITY_USD", "1000"))
-    min_volume_24h_usd: float = float(os.getenv("MIN_VOLUME_24H_USD", "500"))
+    min_liquidity_usd: float = float(os.getenv("MIN_LIQUIDITY_USD", "5000"))
+    min_volume_24h_usd: float = float(os.getenv("MIN_VOLUME_24H_USD", "2000"))
 
     # ── 安全性フィルタ閾値 ──
     danger_auto_exclude: bool = os.getenv("DANGER_AUTO_EXCLUDE", "true").lower() == "true"
